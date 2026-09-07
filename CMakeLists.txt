@@ -4,36 +4,74 @@ project(socket_chat VERSION 0.1.0 LANGUAGES C)
 
 include(CTest)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
+
+function(socket_chat_enable_warnings target_name)
+    if(MSVC)
+        target_compile_options(${target_name} PRIVATE /W4)
+    else()
+        target_compile_options(${target_name} PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endfunction()
+
+# vcpkg supplies CMake targets for both libraries. Other package managers
+# expose normal headers and library files, which the fallback finders locate.
+find_package(unofficial-sodium CONFIG QUIET)
+
+if(TARGET unofficial-sodium::sodium)
+    set(SOCKET_CHAT_SODIUM_TARGET unofficial-sodium::sodium)
+else()
+    find_package(sodium REQUIRED)
+    set(SOCKET_CHAT_SODIUM_TARGET sodium::sodium)
+endif()
+
+find_package(unofficial-sqlite3 CONFIG QUIET)
+
+if(TARGET unofficial::sqlite3::sqlite3)
+    set(SOCKET_CHAT_SQLITE_TARGET unofficial::sqlite3::sqlite3)
+else()
+    find_package(SQLite3 REQUIRED)
+
+    if(TARGET SQLite3::SQLite3)
+        set(SOCKET_CHAT_SQLITE_TARGET SQLite3::SQLite3)
+    else()
+        set(SOCKET_CHAT_SQLITE_TARGET SQLite::SQLite3)
+    endif()
+endif()
+
+add_library(chat_dependencies STATIC
+    src/core/dependencies.c
+)
+target_include_directories(chat_dependencies PUBLIC src)
+target_link_libraries(chat_dependencies PUBLIC
+    ${SOCKET_CHAT_SODIUM_TARGET}
+    ${SOCKET_CHAT_SQLITE_TARGET}
+)
+socket_chat_enable_warnings(chat_dependencies)
 
 add_library(chat_protocol STATIC
     src/protocol/protocol.c
 )
 target_include_directories(chat_protocol PUBLIC src)
+socket_chat_enable_warnings(chat_protocol)
 
 add_executable(socket_chat src/main.c)
-target_link_libraries(socket_chat PRIVATE chat_protocol)
-
-if(MSVC)
-    target_compile_options(socket_chat PRIVATE /W4)
-    target_compile_options(chat_protocol PRIVATE /W4)
-else()
-    target_compile_options(socket_chat PRIVATE -Wall -Wextra -Wpedantic)
-    target_compile_options(chat_protocol PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+target_link_libraries(socket_chat PRIVATE chat_dependencies chat_protocol)
+socket_chat_enable_warnings(socket_chat)
 
 if(BUILD_TESTING)
+    add_executable(dependencies_tests tests/dependencies_test.c)
+    target_link_libraries(dependencies_tests PRIVATE chat_dependencies)
+    socket_chat_enable_warnings(dependencies_tests)
+    add_test(NAME dependencies_tests COMMAND dependencies_tests)
+
     add_executable(protocol_tests tests/protocol_test.c)
     target_link_libraries(protocol_tests PRIVATE chat_protocol)
-
-    if(MSVC)
-        target_compile_options(protocol_tests PRIVATE /W4)
-    else()
-        target_compile_options(protocol_tests PRIVATE -Wall -Wextra -Wpedantic)
-    endif()
-
+    socket_chat_enable_warnings(protocol_tests)
     add_test(NAME protocol_tests COMMAND protocol_tests)
 endif()
 
