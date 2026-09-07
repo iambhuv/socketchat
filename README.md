@@ -2,8 +2,9 @@
 
 A multi-user chat application written in C with Raylib for the interface.
 
-The project currently opens a blank, resizable window. We will build the UI and
-networking in small, reusable modules as the project grows.
+The project currently opens a blank, resizable window and contains the binary
+protocol module that the future client and relay will share. We will build the
+UI and networking in small, reusable modules as the project grows.
 
 ## Build
 
