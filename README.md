@@ -7,6 +7,9 @@ protocol and cross-platform TCP modules that the future client and relay will
 share. We will build the UI and networking in small, reusable modules as the
 project grows.
 
+`socket_chat` is always the Raylib GUI client. The separate
+`socket_chat_relay` program is the headless relay server.
+
 ## Build
 
 You need CMake 3.20 or newer, a C compiler, libsodium, and SQLite. CMake uses an
@@ -67,3 +70,24 @@ The dependency test checks that libsodium can generate random bytes and SQLite
 can create a small in-memory database. It does not create a file on your disk.
 The networking test opens a temporary connection on your own computer and sends
 a small message in both directions.
+
+## Basic relay
+
+Start the relay on its default TCP port, 5050:
+
+```sh
+./build/socket_chat_relay
+```
+
+You can choose another port by passing it as the first argument:
+
+```sh
+./build/socket_chat_relay 7000
+```
+
+On Windows with a Debug build, use `build\Debug\socket_chat_relay.exe`.
+
+The current relay accepts up to 32 clients. It validates binary protocol frames,
+records each connection's claimed identity from `HELLO`, and replies to `PING`
+with `PONG`. Authentication, encryption, and queued-message storage are added in
+later stages.

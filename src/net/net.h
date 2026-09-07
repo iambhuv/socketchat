@@ -51,6 +51,23 @@ NetStatus net_accept(
 /* Useful when net_listen() is given port 0 in a test. */
 NetStatus net_get_local_port(NetSocket socket, uint16_t *port);
 
+/*
+ * Waits until sockets can be read without blocking. A timeout of -1 waits
+ * forever, 0 only checks once, and a positive value is measured in milliseconds.
+ */
+NetStatus net_wait_readable(
+    const NetSocket *sockets,
+    size_t socket_count,
+    int timeout_milliseconds,
+    bool *readable);
+
+/* Receives up to capacity bytes and reports how many bytes arrived. */
+NetStatus net_receive_some(
+    NetSocket socket,
+    void *data,
+    size_t capacity,
+    size_t *bytes_received);
+
 /* These functions keep working until the complete buffer is transferred. */
 NetStatus net_send_all(NetSocket socket, const void *data, size_t size);
 NetStatus net_receive_exact(NetSocket socket, void *data, size_t size);

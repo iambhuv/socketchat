@@ -36,7 +36,10 @@ int main(void)
     NetSocket listening_socket = net_socket_invalid();
     NetSocket client_socket = net_socket_invalid();
     NetSocket server_socket = net_socket_invalid();
+    NetSocket readable_sockets[1];
+    bool readable[1];
     unsigned char received[4];
+    size_t received_size;
     uint16_t port;
 
     if (!status_is_ok(net_init(), "net_init"))
@@ -62,12 +65,31 @@ int main(void)
             1);
     }
 
+    readable_sockets[0] = server_socket;
+
     if (!status_is_ok(
             net_send_all(client_socket, client_message, sizeof(client_message)),
             "client net_send_all") ||
         !status_is_ok(
-            net_receive_exact(server_socket, received, sizeof(received)),
-            "server net_receive_exact") ||
+            net_wait_readable(readable_sockets, 1, 1000, readable),
+            "server net_wait_readable") ||
+        !readable[0])
+    {
+        return finish_test(
+            &listening_socket,
+            &client_socket,
+            &server_socket,
+            1);
+    }
+
+    if (!status_is_ok(
+            net_receive_some(
+                server_socket,
+                received,
+                sizeof(received),
+                &received_size),
+            "server net_receive_some") ||
+        received_size != sizeof(received) ||
         memcmp(received, client_message, sizeof(received)) != 0)
     {
         return finish_test(

@@ -70,9 +70,21 @@ endif()
 
 socket_chat_enable_warnings(chat_net)
 
+add_library(chat_relay STATIC
+    src/relay/relay_server.c
+    src/relay/relay_session.c
+)
+target_include_directories(chat_relay PUBLIC src)
+target_link_libraries(chat_relay PUBLIC chat_net chat_protocol)
+socket_chat_enable_warnings(chat_relay)
+
 add_executable(socket_chat src/main.c)
 target_link_libraries(socket_chat PRIVATE chat_dependencies chat_protocol)
 socket_chat_enable_warnings(socket_chat)
+
+add_executable(socket_chat_relay src/relay/relay_main.c)
+target_link_libraries(socket_chat_relay PRIVATE chat_relay)
+socket_chat_enable_warnings(socket_chat_relay)
 
 if(BUILD_TESTING)
     add_executable(dependencies_tests tests/dependencies_test.c)
@@ -89,6 +101,11 @@ if(BUILD_TESTING)
     target_link_libraries(net_tests PRIVATE chat_net)
     socket_chat_enable_warnings(net_tests)
     add_test(NAME net_tests COMMAND net_tests)
+
+    add_executable(relay_session_tests tests/relay_session_test.c)
+    target_link_libraries(relay_session_tests PRIVATE chat_relay)
+    socket_chat_enable_warnings(relay_session_tests)
+    add_test(NAME relay_session_tests COMMAND relay_session_tests)
 endif()
 
 find_package(raylib 6.0 QUIET)

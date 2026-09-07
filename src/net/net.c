@@ -379,6 +379,148 @@ NetStatus net_get_local_port(NetSocket socket, uint16_t *port)
     return NET_STATUS_IO_FAILED;
 }
 
+NetStatus net_wait_readable(
+    const NetSocket *sockets,
+    size_t socket_count,
+    int timeout_milliseconds,
+    bool *readable)
+{
+    fd_set read_set;
+    struct timeval timeout;
+    struct timeval *timeout_pointer = NULL;
+    NativeSocket largest_socket = 0;
+    size_t index;
+    int selected;
+
+    if (sockets == NULL || readable == NULL || socket_count == 0 ||
+        timeout_milliseconds < -1 || socket_count > (size_t)FD_SETSIZE)
+    {
+        return NET_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!net_initialized)
+    {
+        return NET_STATUS_NOT_INITIALIZED;
+    }
+
+    FD_ZERO(&read_set);
+
+    for (index = 0; index < socket_count; ++index)
+    {
+        const NativeSocket socket = net_native_socket(sockets[index]);
+
+        readable[index] = false;
+
+        if (!net_socket_is_valid(sockets[index]))
+        {
+            return NET_STATUS_INVALID_ARGUMENT;
+        }
+
+#ifndef _WIN32
+        if (socket >= FD_SETSIZE)
+        {
+            return NET_STATUS_INVALID_ARGUMENT;
+        }
+#endif
+
+        FD_SET(socket, &read_set);
+
+        if (socket > largest_socket)
+        {
+            largest_socket = socket;
+        }
+    }
+
+    if (timeout_milliseconds >= 0)
+    {
+        timeout.tv_sec = timeout_milliseconds / 1000;
+        timeout.tv_usec = (timeout_milliseconds % 1000) * 1000;
+        timeout_pointer = &timeout;
+    }
+
+#ifdef _WIN32
+    selected = select(0, &read_set, NULL, NULL, timeout_pointer);
+#else
+    selected = select(largest_socket + 1, &read_set, NULL, NULL, timeout_pointer);
+#endif
+
+    if (selected < 0)
+    {
+        return NET_STATUS_IO_FAILED;
+    }
+
+    for (index = 0; index < socket_count; ++index)
+    {
+        readable[index] =
+            FD_ISSET(net_native_socket(sockets[index]), &read_set) != 0;
+    }
+
+    return NET_STATUS_OK;
+}
+
+NetStatus net_receive_some(
+    NetSocket socket,
+    void *data,
+    size_t capacity,
+    size_t *bytes_received)
+{
+    const int chunk_size = capacity > INT_MAX ? INT_MAX : (int)capacity;
+
+    if (!net_socket_is_valid(socket) || data == NULL || capacity == 0 ||
+        bytes_received == NULL)
+    {
+        return NET_STATUS_INVALID_ARGUMENT;
+    }
+
+    *bytes_received = 0;
+
+    if (!net_initialized)
+    {
+        return NET_STATUS_NOT_INITIALIZED;
+    }
+
+    for (;;)
+    {
+#ifdef _WIN32
+        const int received = recv(
+            net_native_socket(socket),
+            (char *)data,
+            chunk_size,
+            0);
+#else
+        const ssize_t received = recv(
+            net_native_socket(socket),
+            data,
+            (size_t)chunk_size,
+            0);
+#endif
+
+        if (received > 0)
+        {
+            *bytes_received = (size_t)received;
+            return NET_STATUS_OK;
+        }
+
+        if (received == 0)
+        {
+            return NET_STATUS_CLOSED;
+        }
+
+        {
+            const int error = net_last_native_error();
+
+            if (net_error_was_interrupted(error))
+            {
+                continue;
+            }
+
+            return net_error_means_closed(error)
+                       ? NET_STATUS_CLOSED
+                       : NET_STATUS_IO_FAILED;
+        }
+    }
+}
+
 NetStatus net_send_all(NetSocket socket, const void *data, size_t size)
 {
     const unsigned char *bytes = data;
