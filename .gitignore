@@ -1,0 +1,8 @@
+build/
+cmake-build-*/
+.vscode/
+.DS_Store
+
+# Compiled programs
+socket_chat
+socket_chat.exe
