@@ -59,6 +59,17 @@ add_library(chat_protocol STATIC
 target_include_directories(chat_protocol PUBLIC src)
 socket_chat_enable_warnings(chat_protocol)
 
+add_library(chat_net STATIC
+    src/net/net.c
+)
+target_include_directories(chat_net PUBLIC src)
+
+if(WIN32)
+    target_link_libraries(chat_net PUBLIC ws2_32)
+endif()
+
+socket_chat_enable_warnings(chat_net)
+
 add_executable(socket_chat src/main.c)
 target_link_libraries(socket_chat PRIVATE chat_dependencies chat_protocol)
 socket_chat_enable_warnings(socket_chat)
@@ -73,6 +84,11 @@ if(BUILD_TESTING)
     target_link_libraries(protocol_tests PRIVATE chat_protocol)
     socket_chat_enable_warnings(protocol_tests)
     add_test(NAME protocol_tests COMMAND protocol_tests)
+
+    add_executable(net_tests tests/net_test.c)
+    target_link_libraries(net_tests PRIVATE chat_net)
+    socket_chat_enable_warnings(net_tests)
+    add_test(NAME net_tests COMMAND net_tests)
 endif()
 
 find_package(raylib 6.0 QUIET)

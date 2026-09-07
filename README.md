@@ -2,9 +2,10 @@
 
 A multi-user chat application written in C with Raylib for the interface.
 
-The project currently opens a blank, resizable window and contains the binary
-protocol module that the future client and relay will share. We will build the
-UI and networking in small, reusable modules as the project grows.
+The project currently opens a blank, resizable window and contains binary
+protocol and cross-platform TCP modules that the future client and relay will
+share. We will build the UI and networking in small, reusable modules as the
+project grows.
 
 ## Build
 
@@ -64,3 +65,5 @@ ctest --test-dir build --output-on-failure
 
 The dependency test checks that libsodium can generate random bytes and SQLite
 can create a small in-memory database. It does not create a file on your disk.
+The networking test opens a temporary connection on your own computer and sends
+a small message in both directions.
