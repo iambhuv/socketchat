@@ -9,7 +9,6 @@ static const uint8_t CLIENT_AUTH_DOMAIN[] = "GSC/CLIENT_AUTH/1";
 static const uint8_t TRANSPORT_DOMAIN[] = "GSC/TRANSPORT/1";
 static const uint8_t CHAT_KEY_DOMAIN[] = "GSC/CHAT_KEY/1";
 static const uint8_t CHAT_CONTEXT_DOMAIN[] = "GSC/CHAT_CONTEXT/1";
-static const uint8_t ROOM_SNAPSHOT_DOMAIN[] = "GSC/ROOM_SNAPSHOT/1";
 
 static void write_u16(uint8_t *output, uint16_t value)
 {
@@ -91,11 +90,6 @@ static int is_packet_kind_valid(uint8_t kind)
            kind == PROTOCOL_PACKET_ENCRYPTED_MESSAGE;
 }
 
-static int is_chat_kind_valid(uint8_t kind)
-{
-    return kind == PROTOCOL_CHAT_DIRECT || kind == PROTOCOL_CHAT_ROOM;
-}
-
 static int is_acknowledge_result_valid(uint8_t result)
 {
     return result == PROTOCOL_ACK_STORED ||
@@ -107,7 +101,6 @@ static int is_content_type_valid(uint8_t type)
 {
     return type == PROTOCOL_CONTENT_TEXT ||
            type == PROTOCOL_CONTENT_DELIVERY_RECEIPT ||
-           type == PROTOCOL_CONTENT_ROOM_SNAPSHOT ||
            type == PROTOCOL_CONTENT_CHAT_KEY_UPDATE ||
            type == PROTOCOL_CONTENT_CHAT_LEAVE;
 }
@@ -202,21 +195,6 @@ static int is_valid_utf8(const uint8_t *text, size_t length)
     return 1;
 }
 
-static int is_all_zero(const uint8_t *bytes, size_t size)
-{
-    size_t index;
-
-    for (index = 0; index < size; ++index)
-    {
-        if (bytes[index] != 0)
-        {
-            return 0;
-        }
-    }
-
-    return 1;
-}
-
 static ProtocolStatus copy_fixed_payload(
     uint8_t *output,
     const uint8_t *input,
@@ -292,7 +270,7 @@ const char *protocol_status_string(ProtocolStatus status)
 
 size_t protocol_frame_size(uint32_t payload_length)
 {
-    if (payload_length > PROTOCOL_MAX_RELAY_PAYLOAD)
+    if (payload_length > PROTOCOL_MAX_SERVER_PAYLOAD)
     {
         return 0;
     }
@@ -322,7 +300,7 @@ ProtocolStatus protocol_encode_frame(
         return PROTOCOL_STATUS_INVALID_TYPE;
     }
 
-    if (payload_length > PROTOCOL_MAX_RELAY_PAYLOAD)
+    if (payload_length > PROTOCOL_MAX_SERVER_PAYLOAD)
     {
         return PROTOCOL_STATUS_INVALID_LENGTH;
     }
@@ -390,7 +368,7 @@ ProtocolStatus protocol_decode_frame(
     }
 
     payload_length = read_u32(input + 12);
-    if (payload_length > PROTOCOL_MAX_RELAY_PAYLOAD)
+    if (payload_length > PROTOCOL_MAX_SERVER_PAYLOAD)
     {
         return PROTOCOL_STATUS_INVALID_LENGTH;
     }
@@ -990,7 +968,7 @@ ProtocolStatus protocol_encode_deliver(
     write_u64(output, message->delivery_id);
     memcpy(output + 8, message->packet_id, PROTOCOL_PACKET_ID_SIZE);
     memcpy(output + 24, message->sender_id, PROTOCOL_IDENTITY_ID_SIZE);
-    write_u64(output + 56, message->relay_received_at_unix_ms);
+    write_u64(output + 56, message->server_received_at_unix_ms);
     write_u32(output + 64, message->packet_length);
     if (message->packet_length > 0)
     {
@@ -1033,7 +1011,7 @@ ProtocolStatus protocol_decode_deliver(
 
     memcpy(message->packet_id, payload + 8, PROTOCOL_PACKET_ID_SIZE);
     memcpy(message->sender_id, payload + 24, PROTOCOL_IDENTITY_ID_SIZE);
-    message->relay_received_at_unix_ms = read_u64(payload + 56);
+    message->server_received_at_unix_ms = read_u64(payload + 56);
     message->packet_length = packet_length;
     message->packet = payload + 68;
 
@@ -1404,7 +1382,6 @@ ProtocolStatus protocol_decode_packet(
 ProtocolStatus protocol_build_chat_key_signature_data(
     uint8_t *output,
     size_t output_size,
-    ProtocolChatKind chat_kind,
     const uint8_t chat_id[PROTOCOL_CHAT_ID_SIZE],
     uint32_t key_version,
     const uint8_t member_public_key[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE],
@@ -1412,7 +1389,7 @@ ProtocolStatus protocol_build_chat_key_signature_data(
     size_t *bytes_written)
 {
     const size_t domain_size = sizeof(CHAT_KEY_DOMAIN) - 1;
-    const size_t required_size = domain_size + 1u + PROTOCOL_CHAT_ID_SIZE + 4u +
+    const size_t required_size = domain_size + PROTOCOL_CHAT_ID_SIZE + 4u +
                                  PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE +
                                  PROTOCOL_CHAT_PUBLIC_KEY_SIZE;
     size_t offset = 0;
@@ -1421,11 +1398,6 @@ ProtocolStatus protocol_build_chat_key_signature_data(
         chat_public_key == NULL || bytes_written == NULL)
     {
         return PROTOCOL_STATUS_INVALID_ARGUMENT;
-    }
-
-    if (!is_chat_kind_valid((uint8_t)chat_kind))
-    {
-        return PROTOCOL_STATUS_INVALID_TYPE;
     }
 
     if (key_version == 0)
@@ -1440,7 +1412,6 @@ ProtocolStatus protocol_build_chat_key_signature_data(
 
     memcpy(output + offset, CHAT_KEY_DOMAIN, domain_size);
     offset += domain_size;
-    output[offset++] = (uint8_t)chat_kind;
     memcpy(output + offset, chat_id, PROTOCOL_CHAT_ID_SIZE);
     offset += PROTOCOL_CHAT_ID_SIZE;
     write_u32(output + offset, key_version);
@@ -1465,11 +1436,6 @@ ProtocolStatus protocol_encode_chat_key_payload(
         return PROTOCOL_STATUS_INVALID_ARGUMENT;
     }
 
-    if (!is_chat_kind_valid((uint8_t)chat_key->chat_kind))
-    {
-        return PROTOCOL_STATUS_INVALID_TYPE;
-    }
-
     if (chat_key->key_version == 0)
     {
         return PROTOCOL_STATUS_INVALID_VALUE;
@@ -1480,10 +1446,9 @@ ProtocolStatus protocol_encode_chat_key_payload(
         return PROTOCOL_STATUS_BUFFER_TOO_SMALL;
     }
 
-    output[0] = (uint8_t)chat_key->chat_kind;
-    write_u32(output + 1, chat_key->key_version);
-    memcpy(output + 5, chat_key->public_key, PROTOCOL_CHAT_PUBLIC_KEY_SIZE);
-    memcpy(output + 37, chat_key->signature, PROTOCOL_SIGNATURE_SIZE);
+    write_u32(output, chat_key->key_version);
+    memcpy(output + 4, chat_key->public_key, PROTOCOL_CHAT_PUBLIC_KEY_SIZE);
+    memcpy(output + 36, chat_key->signature, PROTOCOL_SIGNATURE_SIZE);
     *bytes_written = PROTOCOL_CHAT_KEY_PAYLOAD_SIZE;
 
     return PROTOCOL_STATUS_OK;
@@ -1504,20 +1469,14 @@ ProtocolStatus protocol_decode_chat_key_payload(
         return PROTOCOL_STATUS_INVALID_LENGTH;
     }
 
-    if (!is_chat_kind_valid(payload[0]))
-    {
-        return PROTOCOL_STATUS_INVALID_TYPE;
-    }
-
-    if (read_u32(payload + 1) == 0)
+    if (read_u32(payload) == 0)
     {
         return PROTOCOL_STATUS_INVALID_VALUE;
     }
 
-    chat_key->chat_kind = (ProtocolChatKind)payload[0];
-    chat_key->key_version = read_u32(payload + 1);
-    memcpy(chat_key->public_key, payload + 5, PROTOCOL_CHAT_PUBLIC_KEY_SIZE);
-    memcpy(chat_key->signature, payload + 37, PROTOCOL_SIGNATURE_SIZE);
+    chat_key->key_version = read_u32(payload);
+    memcpy(chat_key->public_key, payload + 4, PROTOCOL_CHAT_PUBLIC_KEY_SIZE);
+    memcpy(chat_key->signature, payload + 36, PROTOCOL_SIGNATURE_SIZE);
 
     return PROTOCOL_STATUS_OK;
 }
@@ -1525,38 +1484,29 @@ ProtocolStatus protocol_decode_chat_key_payload(
 ProtocolStatus protocol_build_chat_key_context_data(
     uint8_t *output,
     size_t output_size,
-    ProtocolChatKind chat_kind,
     const uint8_t chat_id[PROTOCOL_CHAT_ID_SIZE],
-    uint64_t chat_revision,
-    const uint8_t client_identity_public_key[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE],
-    uint32_t client_key_version,
-    const uint8_t server_identity_public_key[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE],
-    uint32_t server_key_version,
+    const uint8_t lower_identity_public_key[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE],
+    uint32_t lower_key_version,
+    const uint8_t higher_identity_public_key[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE],
+    uint32_t higher_key_version,
     size_t *bytes_written)
 {
     const size_t domain_size = sizeof(CHAT_CONTEXT_DOMAIN) - 1;
-    const size_t required_size = domain_size + 1u + PROTOCOL_CHAT_ID_SIZE + 8u +
+    const size_t required_size = domain_size + PROTOCOL_CHAT_ID_SIZE +
                                  PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE + 4u +
                                  PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE + 4u;
     size_t offset = 0;
 
     if (output == NULL || chat_id == NULL ||
-        client_identity_public_key == NULL ||
-        server_identity_public_key == NULL || bytes_written == NULL)
+        lower_identity_public_key == NULL ||
+        higher_identity_public_key == NULL || bytes_written == NULL)
     {
         return PROTOCOL_STATUS_INVALID_ARGUMENT;
     }
 
-    if (!is_chat_kind_valid((uint8_t)chat_kind))
-    {
-        return PROTOCOL_STATUS_INVALID_TYPE;
-    }
-
-    if (client_key_version == 0 || server_key_version == 0 ||
-        (chat_kind == PROTOCOL_CHAT_DIRECT && chat_revision != 0) ||
-        (chat_kind == PROTOCOL_CHAT_ROOM && chat_revision == 0) ||
-        memcmp(client_identity_public_key,
-               server_identity_public_key,
+    if (lower_key_version == 0 || higher_key_version == 0 ||
+        memcmp(lower_identity_public_key,
+               higher_identity_public_key,
                PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE) >= 0)
     {
         return PROTOCOL_STATUS_INVALID_VALUE;
@@ -1569,22 +1519,19 @@ ProtocolStatus protocol_build_chat_key_context_data(
 
     memcpy(output, CHAT_CONTEXT_DOMAIN, domain_size);
     offset += domain_size;
-    output[offset++] = (uint8_t)chat_kind;
     memcpy(output + offset, chat_id, PROTOCOL_CHAT_ID_SIZE);
     offset += PROTOCOL_CHAT_ID_SIZE;
-    write_u64(output + offset, chat_revision);
-    offset += 8;
     memcpy(output + offset,
-           client_identity_public_key,
+           lower_identity_public_key,
            PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE);
     offset += PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE;
-    write_u32(output + offset, client_key_version);
+    write_u32(output + offset, lower_key_version);
     offset += 4;
     memcpy(output + offset,
-           server_identity_public_key,
+           higher_identity_public_key,
            PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE);
     offset += PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE;
-    write_u32(output + offset, server_key_version);
+    write_u32(output + offset, higher_key_version);
     offset += 4;
 
     *bytes_written = offset;
@@ -1614,7 +1561,6 @@ ProtocolStatus protocol_encode_encrypted_packet_prefix(
     const uint8_t message_id[PROTOCOL_MESSAGE_ID_SIZE],
     uint32_t sender_key_version,
     uint32_t recipient_key_version,
-    uint64_t chat_revision,
     const uint8_t nonce[PROTOCOL_NONCE_SIZE],
     uint32_t ciphertext_length,
     size_t *bytes_written)
@@ -1664,9 +1610,8 @@ ProtocolStatus protocol_encode_encrypted_packet_prefix(
     memcpy(payload, message_id, PROTOCOL_MESSAGE_ID_SIZE);
     write_u32(payload + 16, sender_key_version);
     write_u32(payload + 20, recipient_key_version);
-    write_u64(payload + 24, chat_revision);
-    memcpy(payload + 32, nonce, PROTOCOL_NONCE_SIZE);
-    write_u32(payload + 56, ciphertext_length);
+    memcpy(payload + 24, nonce, PROTOCOL_NONCE_SIZE);
+    write_u32(payload + 48, ciphertext_length);
 
     *bytes_written = prefix_size;
     return PROTOCOL_STATUS_OK;
@@ -1694,7 +1639,7 @@ ProtocolStatus protocol_decode_encrypted_message(
         return PROTOCOL_STATUS_INVALID_LENGTH;
     }
 
-    ciphertext_length = read_u32(packet->payload + 56);
+    ciphertext_length = read_u32(packet->payload + 48);
     if (ciphertext_length < PROTOCOL_AEAD_TAG_SIZE ||
         protocol_encrypted_payload_size(ciphertext_length) != packet->payload_length)
     {
@@ -1709,8 +1654,7 @@ ProtocolStatus protocol_decode_encrypted_message(
         return PROTOCOL_STATUS_INVALID_VALUE;
     }
 
-    message->chat_revision = read_u64(packet->payload + 24);
-    memcpy(message->nonce, packet->payload + 32, PROTOCOL_NONCE_SIZE);
+    memcpy(message->nonce, packet->payload + 24, PROTOCOL_NONCE_SIZE);
     message->ciphertext_length = ciphertext_length;
     message->ciphertext = packet->payload + PROTOCOL_ENCRYPTED_PAYLOAD_HEADER_SIZE;
     message->authenticated_data = packet->signed_bytes;
@@ -2043,337 +1987,5 @@ ProtocolStatus protocol_decode_chat_leave_data(
     }
 
     *sender_timestamp_unix_ms = read_u64(data);
-    return PROTOCOL_STATUS_OK;
-}
-
-size_t protocol_room_snapshot_size(
-    uint16_t room_name_length,
-    uint16_t member_count)
-{
-    return 76u + (size_t)room_name_length +
-           (size_t)member_count * PROTOCOL_ROOM_MEMBER_SIZE +
-           PROTOCOL_SIGNATURE_SIZE;
-}
-
-ProtocolStatus protocol_encode_unsigned_room_snapshot(
-    uint8_t *output,
-    size_t output_size,
-    const ProtocolRoomSnapshot *snapshot,
-    size_t *bytes_written)
-{
-    size_t full_size;
-    size_t unsigned_size;
-    size_t offset;
-    uint16_t index;
-    unsigned int owner_matches = 0;
-
-    if (output == NULL || snapshot == NULL || bytes_written == NULL ||
-        (snapshot->room_name_length > 0 && snapshot->room_name == NULL) ||
-        (snapshot->member_count > 0 && snapshot->members == NULL))
-    {
-        return PROTOCOL_STATUS_INVALID_ARGUMENT;
-    }
-
-    if (snapshot->revision == 0 ||
-        snapshot->room_name_length > PROTOCOL_MAX_ROOM_NAME_SIZE ||
-        snapshot->member_count == 0 ||
-        snapshot->member_count > PROTOCOL_MAX_ROOM_MEMBERS ||
-        !is_valid_utf8(snapshot->room_name, snapshot->room_name_length))
-    {
-        return PROTOCOL_STATUS_INVALID_LENGTH;
-    }
-
-    if ((snapshot->revision == 1 &&
-         !is_all_zero(snapshot->previous_snapshot_hash,
-                      PROTOCOL_IDENTITY_ID_SIZE)) ||
-        (snapshot->revision > 1 &&
-         is_all_zero(snapshot->previous_snapshot_hash,
-                     PROTOCOL_IDENTITY_ID_SIZE)))
-    {
-        return PROTOCOL_STATUS_INVALID_VALUE;
-    }
-
-    for (index = 0; index < snapshot->member_count; ++index)
-    {
-        if (snapshot->members[index].key_version == 0)
-        {
-            return PROTOCOL_STATUS_INVALID_VALUE;
-        }
-
-        if (memcmp(snapshot->members[index].identity_public_key,
-                   snapshot->owner_public_key,
-                   PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE) == 0)
-        {
-            owner_matches += 1;
-        }
-
-        if (index > 0 &&
-            memcmp(snapshot->members[index - 1].identity_public_key,
-                   snapshot->members[index].identity_public_key,
-                   PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE) >= 0)
-        {
-            return PROTOCOL_STATUS_INVALID_VALUE;
-        }
-    }
-
-    if (owner_matches != 1)
-    {
-        return PROTOCOL_STATUS_INVALID_VALUE;
-    }
-
-    full_size = protocol_room_snapshot_size(
-        snapshot->room_name_length,
-        snapshot->member_count);
-    unsigned_size = full_size - PROTOCOL_SIGNATURE_SIZE;
-
-    if (output_size < unsigned_size)
-    {
-        return PROTOCOL_STATUS_BUFFER_TOO_SMALL;
-    }
-
-    write_u64(output, snapshot->revision);
-    memcpy(output + 8, snapshot->previous_snapshot_hash, PROTOCOL_IDENTITY_ID_SIZE);
-    memcpy(output + 40, snapshot->owner_public_key, PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE);
-    write_u16(output + 72, snapshot->room_name_length);
-
-    offset = 74;
-    if (snapshot->room_name_length > 0)
-    {
-        memcpy(output + offset, snapshot->room_name, snapshot->room_name_length);
-        offset += snapshot->room_name_length;
-    }
-
-    write_u16(output + offset, snapshot->member_count);
-    offset += 2;
-
-    for (index = 0; index < snapshot->member_count; ++index)
-    {
-        const ProtocolRoomMember *member = &snapshot->members[index];
-
-        memcpy(output + offset,
-               member->identity_public_key,
-               PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE);
-        offset += PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE;
-        write_u32(output + offset, member->key_version);
-        offset += 4;
-        memcpy(output + offset,
-               member->chat_public_key,
-               PROTOCOL_CHAT_PUBLIC_KEY_SIZE);
-        offset += PROTOCOL_CHAT_PUBLIC_KEY_SIZE;
-        memcpy(output + offset,
-               member->chat_key_signature,
-               PROTOCOL_SIGNATURE_SIZE);
-        offset += PROTOCOL_SIGNATURE_SIZE;
-    }
-
-    *bytes_written = offset;
-    return PROTOCOL_STATUS_OK;
-}
-
-ProtocolStatus protocol_append_room_snapshot_signature(
-    uint8_t *snapshot,
-    size_t snapshot_capacity,
-    size_t unsigned_snapshot_size,
-    const uint8_t signature[PROTOCOL_SIGNATURE_SIZE],
-    size_t *bytes_written)
-{
-    size_t total_size;
-
-    if (snapshot == NULL || signature == NULL || bytes_written == NULL)
-    {
-        return PROTOCOL_STATUS_INVALID_ARGUMENT;
-    }
-
-    if (unsigned_snapshot_size < 76u ||
-        unsigned_snapshot_size >
-            protocol_room_snapshot_size(
-                PROTOCOL_MAX_ROOM_NAME_SIZE,
-                PROTOCOL_MAX_ROOM_MEMBERS) - PROTOCOL_SIGNATURE_SIZE)
-    {
-        return PROTOCOL_STATUS_INVALID_LENGTH;
-    }
-
-    total_size = unsigned_snapshot_size + PROTOCOL_SIGNATURE_SIZE;
-
-    if (snapshot_capacity < total_size)
-    {
-        return PROTOCOL_STATUS_BUFFER_TOO_SMALL;
-    }
-
-    memcpy(snapshot + unsigned_snapshot_size, signature, PROTOCOL_SIGNATURE_SIZE);
-    *bytes_written = total_size;
-
-    return PROTOCOL_STATUS_OK;
-}
-
-ProtocolStatus protocol_build_room_snapshot_signature_data(
-    uint8_t *output,
-    size_t output_size,
-    const uint8_t chat_id[PROTOCOL_CHAT_ID_SIZE],
-    const uint8_t *unsigned_snapshot,
-    size_t unsigned_snapshot_size,
-    size_t *bytes_written)
-{
-    const size_t domain_size = sizeof(ROOM_SNAPSHOT_DOMAIN) - 1;
-    size_t required_size;
-
-    if (output == NULL || chat_id == NULL || unsigned_snapshot == NULL ||
-        bytes_written == NULL)
-    {
-        return PROTOCOL_STATUS_INVALID_ARGUMENT;
-    }
-
-    if (unsigned_snapshot_size < 76u ||
-        unsigned_snapshot_size >
-            protocol_room_snapshot_size(
-                PROTOCOL_MAX_ROOM_NAME_SIZE,
-                PROTOCOL_MAX_ROOM_MEMBERS) - PROTOCOL_SIGNATURE_SIZE)
-    {
-        return PROTOCOL_STATUS_INVALID_LENGTH;
-    }
-
-    required_size = domain_size + PROTOCOL_CHAT_ID_SIZE + unsigned_snapshot_size;
-
-    if (output_size < required_size)
-    {
-        return PROTOCOL_STATUS_BUFFER_TOO_SMALL;
-    }
-
-    memcpy(output, ROOM_SNAPSHOT_DOMAIN, domain_size);
-    memcpy(output + domain_size, chat_id, PROTOCOL_CHAT_ID_SIZE);
-    memcpy(output + domain_size + PROTOCOL_CHAT_ID_SIZE,
-           unsigned_snapshot,
-           unsigned_snapshot_size);
-    *bytes_written = required_size;
-
-    return PROTOCOL_STATUS_OK;
-}
-
-ProtocolStatus protocol_decode_room_snapshot(
-    const uint8_t *data,
-    size_t data_size,
-    ProtocolRoomSnapshotView *snapshot)
-{
-    uint16_t room_name_length;
-    uint16_t member_count;
-    size_t member_count_offset;
-    size_t expected_size;
-    size_t members_offset;
-    uint16_t index;
-    unsigned int owner_matches = 0;
-
-    if (data == NULL || snapshot == NULL)
-    {
-        return PROTOCOL_STATUS_INVALID_ARGUMENT;
-    }
-
-    if (data_size < protocol_room_snapshot_size(0, 1))
-    {
-        return PROTOCOL_STATUS_INVALID_LENGTH;
-    }
-
-    room_name_length = read_u16(data + 72);
-    if (room_name_length > PROTOCOL_MAX_ROOM_NAME_SIZE)
-    {
-        return PROTOCOL_STATUS_INVALID_LENGTH;
-    }
-
-    member_count_offset = 74u + room_name_length;
-    if (member_count_offset + 2u > data_size)
-    {
-        return PROTOCOL_STATUS_INVALID_LENGTH;
-    }
-
-    member_count = read_u16(data + member_count_offset);
-    if (member_count == 0 || member_count > PROTOCOL_MAX_ROOM_MEMBERS)
-    {
-        return PROTOCOL_STATUS_INVALID_LENGTH;
-    }
-
-    expected_size = protocol_room_snapshot_size(room_name_length, member_count);
-    if (expected_size != data_size ||
-        !is_valid_utf8(data + 74, room_name_length))
-    {
-        return PROTOCOL_STATUS_INVALID_LENGTH;
-    }
-
-    members_offset = member_count_offset + 2u;
-    for (index = 0; index < member_count; ++index)
-    {
-        const uint8_t *member = data + members_offset +
-                                (size_t)index * PROTOCOL_ROOM_MEMBER_SIZE;
-
-        if (read_u32(member + 32) == 0)
-        {
-            return PROTOCOL_STATUS_INVALID_VALUE;
-        }
-
-        if (memcmp(member, data + 40, PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE) == 0)
-        {
-            owner_matches += 1;
-        }
-
-        if (index > 0)
-        {
-            const uint8_t *previous = member - PROTOCOL_ROOM_MEMBER_SIZE;
-            if (memcmp(previous, member, PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE) >= 0)
-            {
-                return PROTOCOL_STATUS_INVALID_VALUE;
-            }
-        }
-    }
-
-    snapshot->revision = read_u64(data);
-    if (snapshot->revision == 0)
-    {
-        return PROTOCOL_STATUS_INVALID_VALUE;
-    }
-
-    if (owner_matches != 1 ||
-        (snapshot->revision == 1 &&
-         !is_all_zero(data + 8, PROTOCOL_IDENTITY_ID_SIZE)) ||
-        (snapshot->revision > 1 &&
-         is_all_zero(data + 8, PROTOCOL_IDENTITY_ID_SIZE)))
-    {
-        return PROTOCOL_STATUS_INVALID_VALUE;
-    }
-
-    memcpy(snapshot->previous_snapshot_hash, data + 8, PROTOCOL_IDENTITY_ID_SIZE);
-    memcpy(snapshot->owner_public_key, data + 40, PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE);
-    snapshot->room_name = data + 74;
-    snapshot->room_name_length = room_name_length;
-    snapshot->encoded_members = data + members_offset;
-    snapshot->member_count = member_count;
-    snapshot->owner_signature = data + data_size - PROTOCOL_SIGNATURE_SIZE;
-    snapshot->signed_bytes = data;
-    snapshot->signed_length = data_size - PROTOCOL_SIGNATURE_SIZE;
-
-    return PROTOCOL_STATUS_OK;
-}
-
-ProtocolStatus protocol_decode_room_member(
-    const ProtocolRoomSnapshotView *snapshot,
-    uint16_t member_index,
-    ProtocolRoomMember *member)
-{
-    const uint8_t *encoded;
-
-    if (snapshot == NULL || member == NULL || snapshot->encoded_members == NULL)
-    {
-        return PROTOCOL_STATUS_INVALID_ARGUMENT;
-    }
-
-    if (member_index >= snapshot->member_count)
-    {
-        return PROTOCOL_STATUS_INVALID_LENGTH;
-    }
-
-    encoded = snapshot->encoded_members +
-              (size_t)member_index * PROTOCOL_ROOM_MEMBER_SIZE;
-    memcpy(member->identity_public_key, encoded, PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE);
-    member->key_version = read_u32(encoded + 32);
-    memcpy(member->chat_public_key, encoded + 36, PROTOCOL_CHAT_PUBLIC_KEY_SIZE);
-    memcpy(member->chat_key_signature, encoded + 68, PROTOCOL_SIGNATURE_SIZE);
-
     return PROTOCOL_STATUS_OK;
 }

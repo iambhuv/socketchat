@@ -70,13 +70,13 @@ endif()
 
 socket_chat_enable_warnings(chat_net)
 
-add_library(chat_relay STATIC
-    src/relay/relay_server.c
-    src/relay/relay_session.c
+add_library(chat_server STATIC
+    src/server/server.c
+    src/server/server_session.c
 )
-target_include_directories(chat_relay PUBLIC src)
-target_link_libraries(chat_relay PUBLIC chat_net chat_protocol)
-socket_chat_enable_warnings(chat_relay)
+target_include_directories(chat_server PUBLIC src)
+target_link_libraries(chat_server PUBLIC chat_net chat_protocol)
+socket_chat_enable_warnings(chat_server)
 
 add_library(chat_ui STATIC
     src/ui/ui_animation.c
@@ -88,7 +88,7 @@ target_include_directories(chat_ui PUBLIC src)
 socket_chat_enable_warnings(chat_ui)
 
 add_library(chat_client_ui STATIC
-    src/client/connection_screen.c
+    src/client/onboarding_screen.c
 )
 target_include_directories(chat_client_ui PUBLIC src)
 target_link_libraries(chat_client_ui PUBLIC chat_ui)
@@ -108,9 +108,9 @@ add_custom_command(TARGET socket_chat POST_BUILD
         "$<TARGET_FILE_DIR:socket_chat>/assets"
 )
 
-add_executable(socket_chat_relay src/relay/relay_main.c)
-target_link_libraries(socket_chat_relay PRIVATE chat_relay)
-socket_chat_enable_warnings(socket_chat_relay)
+add_executable(socket_chat_server src/server/server_main.c)
+target_link_libraries(socket_chat_server PRIVATE chat_server)
+socket_chat_enable_warnings(socket_chat_server)
 
 if(BUILD_TESTING)
     add_executable(dependencies_tests tests/dependencies_test.c)
@@ -128,10 +128,10 @@ if(BUILD_TESTING)
     socket_chat_enable_warnings(net_tests)
     add_test(NAME net_tests COMMAND net_tests)
 
-    add_executable(relay_session_tests tests/relay_session_test.c)
-    target_link_libraries(relay_session_tests PRIVATE chat_relay)
-    socket_chat_enable_warnings(relay_session_tests)
-    add_test(NAME relay_session_tests COMMAND relay_session_tests)
+    add_executable(server_session_tests tests/server_session_test.c)
+    target_link_libraries(server_session_tests PRIVATE chat_server)
+    socket_chat_enable_warnings(server_session_tests)
+    add_test(NAME server_session_tests COMMAND server_session_tests)
 endif()
 
 find_package(raylib 6.0 QUIET)

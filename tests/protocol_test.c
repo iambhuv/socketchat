@@ -131,7 +131,7 @@ static int test_authentication_payloads(void)
     return 1;
 }
 
-static int test_relay_payloads(void)
+static int test_server_payloads(void)
 {
     uint8_t packet[32];
     uint8_t send_buffer[128];
@@ -165,14 +165,14 @@ static int test_relay_payloads(void)
     memcpy(deliver.packet_id, send.packet_id, sizeof(deliver.packet_id));
     deliver.delivery_id = 42;
     fill_bytes(deliver.sender_id, sizeof(deliver.sender_id), 0x40);
-    deliver.relay_received_at_unix_ms = UINT64_C(0x0102030405060708);
+    deliver.server_received_at_unix_ms = UINT64_C(0x0102030405060708);
     deliver.packet = packet;
     deliver.packet_length = sizeof(packet);
     CHECK(protocol_encode_deliver(deliver_buffer, sizeof(deliver_buffer),
               &deliver, &written) == PROTOCOL_STATUS_OK);
     CHECK(protocol_decode_deliver(deliver_buffer, written, &decoded_deliver) ==
           PROTOCOL_STATUS_OK);
-    CHECK(decoded_deliver.relay_received_at_unix_ms ==
+    CHECK(decoded_deliver.server_received_at_unix_ms ==
           UINT64_C(0x0102030405060708));
     CHECK(decoded_deliver.delivery_id == 42);
 
@@ -227,19 +227,18 @@ static int test_chat_key_packet(void)
     fill_bytes(chat_key.public_key, sizeof(chat_key.public_key), 0x80);
     fill_bytes(chat_key.signature, sizeof(chat_key.signature), 0xa0);
     fill_bytes(packet_signature, sizeof(packet_signature), 0xc0);
-    chat_key.chat_kind = PROTOCOL_CHAT_DIRECT;
     chat_key.key_version = 1;
 
     CHECK(protocol_build_chat_key_signature_data(key_signature_data,
-              sizeof(key_signature_data), chat_key.chat_kind, chat_id,
-              chat_key.key_version, sender_key, chat_key.public_key,
+              sizeof(key_signature_data), chat_id, chat_key.key_version,
+              sender_key, chat_key.public_key,
               &key_signature_data_size) == PROTOCOL_STATUS_OK);
-    CHECK(key_signature_data_size == 99u);
+    CHECK(key_signature_data_size == 98u);
     CHECK(protocol_build_chat_key_context_data(key_context_data,
-              sizeof(key_context_data), PROTOCOL_CHAT_DIRECT, chat_id, 0,
-              sender_key, 1, recipient_id, 1, &key_context_data_size) ==
+              sizeof(key_context_data), chat_id, sender_key, 1,
+              recipient_id, 1, &key_context_data_size) ==
           PROTOCOL_STATUS_OK);
-    CHECK(key_context_data_size == 115u);
+    CHECK(key_context_data_size == 106u);
     CHECK(protocol_encode_chat_key_payload(payload, sizeof(payload), &chat_key,
               &payload_size) == PROTOCOL_STATUS_OK);
     CHECK(protocol_encode_unsigned_packet(packet, sizeof(packet),
@@ -289,7 +288,7 @@ static int test_encrypted_message_packet(void)
     fill_bytes(signature, sizeof(signature), 0xc1);
 
     CHECK(protocol_encode_encrypted_packet_prefix(packet, sizeof(packet), packet_id,
-              sender_key, recipient_id, chat_id, message_id, 2, 3, 8, nonce,
+              sender_key, recipient_id, chat_id, message_id, 2, 3, nonce,
               sizeof(ciphertext), &prefix_size) == PROTOCOL_STATUS_OK);
     CHECK(prefix_size == PROTOCOL_E2E_HEADER_SIZE +
                          PROTOCOL_ENCRYPTED_PAYLOAD_HEADER_SIZE);
@@ -303,7 +302,6 @@ static int test_encrypted_message_packet(void)
           PROTOCOL_STATUS_OK);
     CHECK(decoded_message.sender_key_version == 2);
     CHECK(decoded_message.recipient_key_version == 3);
-    CHECK(decoded_message.chat_revision == 8);
     CHECK(decoded_message.ciphertext_length == sizeof(ciphertext));
     CHECK(decoded_message.authenticated_data_length == prefix_size);
     CHECK(memcmp(decoded_message.ciphertext, ciphertext, sizeof(ciphertext)) == 0);
@@ -351,70 +349,6 @@ static int test_content_payloads(void)
     return 1;
 }
 
-static int test_room_snapshot(void)
-{
-    static const uint8_t room_name[] = "Study group";
-    ProtocolRoomMember members[2] = { 0 };
-    ProtocolRoomSnapshot snapshot = { 0 };
-    ProtocolRoomSnapshotView decoded_snapshot;
-    ProtocolRoomMember decoded_member;
-    uint8_t snapshot_bytes[1024];
-    uint8_t signature_data[1200];
-    uint8_t owner_signature[PROTOCOL_SIGNATURE_SIZE];
-    uint8_t chat_id[PROTOCOL_CHAT_ID_SIZE];
-    size_t unsigned_size = 0;
-    size_t full_size = 0;
-    size_t signature_data_size = 0;
-
-    memset(members[0].identity_public_key, 0x10,
-           sizeof(members[0].identity_public_key));
-    memset(members[1].identity_public_key, 0x20,
-           sizeof(members[1].identity_public_key));
-    members[0].key_version = 1;
-    members[1].key_version = 2;
-    fill_bytes(members[0].chat_public_key, sizeof(members[0].chat_public_key), 0x30);
-    fill_bytes(members[1].chat_public_key, sizeof(members[1].chat_public_key), 0x50);
-    fill_bytes(members[0].chat_key_signature,
-               sizeof(members[0].chat_key_signature), 0x70);
-    fill_bytes(members[1].chat_key_signature,
-               sizeof(members[1].chat_key_signature), 0x90);
-
-    snapshot.revision = 1;
-    memcpy(snapshot.owner_public_key, members[0].identity_public_key,
-           sizeof(snapshot.owner_public_key));
-    snapshot.room_name = room_name;
-    snapshot.room_name_length = sizeof(room_name) - 1;
-    snapshot.members = members;
-    snapshot.member_count = 2;
-    fill_bytes(owner_signature, sizeof(owner_signature), 0xb0);
-    fill_bytes(chat_id, sizeof(chat_id), 0xd0);
-
-    CHECK(protocol_encode_unsigned_room_snapshot(snapshot_bytes,
-              sizeof(snapshot_bytes), &snapshot, &unsigned_size) ==
-          PROTOCOL_STATUS_OK);
-    CHECK(protocol_build_room_snapshot_signature_data(signature_data,
-              sizeof(signature_data), chat_id, snapshot_bytes, unsigned_size,
-              &signature_data_size) == PROTOCOL_STATUS_OK);
-    CHECK(signature_data_size > unsigned_size);
-    CHECK(protocol_append_room_snapshot_signature(snapshot_bytes,
-              sizeof(snapshot_bytes), unsigned_size, owner_signature, &full_size) ==
-          PROTOCOL_STATUS_OK);
-    CHECK(full_size == protocol_room_snapshot_size(snapshot.room_name_length,
-                                                    snapshot.member_count));
-    CHECK(protocol_decode_room_snapshot(snapshot_bytes, full_size,
-              &decoded_snapshot) == PROTOCOL_STATUS_OK);
-    CHECK(decoded_snapshot.revision == 1);
-    CHECK(decoded_snapshot.member_count == 2);
-    CHECK(memcmp(decoded_snapshot.room_name, room_name, sizeof(room_name) - 1) == 0);
-    CHECK(protocol_decode_room_member(&decoded_snapshot, 1, &decoded_member) ==
-          PROTOCOL_STATUS_OK);
-    CHECK(decoded_member.key_version == 2);
-    CHECK(memcmp(decoded_member.identity_public_key,
-                 members[1].identity_public_key,
-                 sizeof(decoded_member.identity_public_key)) == 0);
-    return 1;
-}
-
 static int test_invalid_lengths_and_values(void)
 {
     uint8_t buffer[256] = { 0 };
@@ -423,16 +357,16 @@ static int test_invalid_lengths_and_values(void)
     ProtocolText text = { 0 };
     size_t written = 0;
 
-    CHECK(protocol_frame_size(PROTOCOL_MAX_RELAY_PAYLOAD + 1u) == 0);
+    CHECK(protocol_frame_size(PROTOCOL_MAX_SERVER_PAYLOAD + 1u) == 0);
     CHECK(protocol_packet_size(UINT32_MAX) == 0);
     CHECK(protocol_content_size(UINT32_MAX) == 0);
     CHECK(protocol_transport_record_size(
               PROTOCOL_FRAME_HEADER_SIZE + PROTOCOL_AEAD_TAG_SIZE - 1u) == 0);
     CHECK(protocol_encode_encrypted_packet_prefix(buffer, sizeof(buffer),
-              id, id, id, id, id, 1, 1, 0, id, UINT32_MAX, &written) ==
+              id, id, id, id, id, 1, 1, id, UINT32_MAX, &written) ==
           PROTOCOL_STATUS_INVALID_LENGTH);
     CHECK(protocol_encode_encrypted_packet_prefix(buffer, sizeof(buffer),
-              id, id, id, id, id, 1, 1, 0, id,
+              id, id, id, id, id, 1, 1, id,
               PROTOCOL_AEAD_TAG_SIZE - 1u, &written) ==
           PROTOCOL_STATUS_INVALID_LENGTH);
 
@@ -447,11 +381,10 @@ int main(void)
 {
     CHECK(test_frame_round_trip());
     CHECK(test_authentication_payloads());
-    CHECK(test_relay_payloads());
+    CHECK(test_server_payloads());
     CHECK(test_chat_key_packet());
     CHECK(test_encrypted_message_packet());
     CHECK(test_content_payloads());
-    CHECK(test_room_snapshot());
     CHECK(test_invalid_lengths_and_values());
 
     puts("protocol tests passed");

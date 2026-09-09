@@ -15,7 +15,8 @@ typedef struct UiButtonState
 typedef enum UiTextInputMode
 {
     UI_TEXT_INPUT_NORMAL = 0,
-    UI_TEXT_INPUT_DIGITS
+    UI_TEXT_INPUT_DIGITS,
+    UI_TEXT_INPUT_USERNAME
 } UiTextInputMode;
 
 typedef struct UiTextInputState

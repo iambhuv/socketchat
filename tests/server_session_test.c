@@ -1,4 +1,4 @@
-#include "relay/relay_session.h"
+#include "server/server_session.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -30,13 +30,13 @@ static ProtocolFrame make_frame(
 
 int main(void)
 {
-    RelaySession session;
+    ServerSession session;
     ProtocolHello hello = { 0 };
     ProtocolFrame frame;
     ProtocolFrame decoded_response;
     uint8_t hello_payload[PROTOCOL_HELLO_SIZE];
     uint8_t ping_payload[8];
-    uint8_t response[RELAY_SESSION_MAX_RESPONSE_SIZE];
+    uint8_t response[SERVER_SESSION_MAX_RESPONSE_SIZE];
     size_t hello_size;
     size_t ping_size;
     size_t response_size;
@@ -61,31 +61,31 @@ int main(void)
               UINT64_C(0x0102030405060708),
               &ping_size) == PROTOCOL_STATUS_OK);
 
-    relay_session_init(&session);
+    server_session_init(&session);
 
     frame = make_frame(
         PROTOCOL_FRAME_PING,
         1,
         ping_payload,
         (uint32_t)ping_size);
-    CHECK(relay_session_handle_frame(
+    CHECK(server_session_handle_frame(
               &session,
               &frame,
               response,
               sizeof(response),
-              &response_size) == RELAY_SESSION_UNEXPECTED_FRAME);
+              &response_size) == SERVER_SESSION_UNEXPECTED_FRAME);
 
     frame = make_frame(
         PROTOCOL_FRAME_HELLO,
         10,
         hello_payload,
         (uint32_t)hello_size);
-    CHECK(relay_session_handle_frame(
+    CHECK(server_session_handle_frame(
               &session,
               &frame,
               response,
               sizeof(response),
-              &response_size) == RELAY_SESSION_ACCEPTED);
+              &response_size) == SERVER_SESSION_ACCEPTED);
     CHECK(session.hello_received);
     CHECK(session.hello_request_id == 10);
     CHECK(memcmp(
@@ -93,24 +93,24 @@ int main(void)
               hello.identity_public_key,
               sizeof(hello.identity_public_key)) == 0);
 
-    CHECK(relay_session_handle_frame(
+    CHECK(server_session_handle_frame(
               &session,
               &frame,
               response,
               sizeof(response),
-              &response_size) == RELAY_SESSION_UNEXPECTED_FRAME);
+              &response_size) == SERVER_SESSION_UNEXPECTED_FRAME);
 
     frame = make_frame(
         PROTOCOL_FRAME_PING,
         20,
         ping_payload,
         (uint32_t)ping_size);
-    CHECK(relay_session_handle_frame(
+    CHECK(server_session_handle_frame(
               &session,
               &frame,
               response,
               sizeof(response),
-              &response_size) == RELAY_SESSION_REPLY_READY);
+              &response_size) == SERVER_SESSION_REPLY_READY);
     CHECK(protocol_decode_frame(
               response,
               response_size,
@@ -129,29 +129,29 @@ int main(void)
         21,
         ping_payload,
         (uint32_t)ping_size);
-    CHECK(relay_session_handle_frame(
+    CHECK(server_session_handle_frame(
               &session,
               &frame,
               response,
               sizeof(response),
-              &response_size) == RELAY_SESSION_ACCEPTED);
+              &response_size) == SERVER_SESSION_ACCEPTED);
     CHECK(response_size == 0);
 
     frame = make_frame(PROTOCOL_FRAME_PONG, 21, ping_payload, 7);
-    CHECK(relay_session_handle_frame(
+    CHECK(server_session_handle_frame(
               &session,
               &frame,
               response,
               sizeof(response),
-              &response_size) == RELAY_SESSION_INVALID_PAYLOAD);
+              &response_size) == SERVER_SESSION_INVALID_PAYLOAD);
 
     frame = make_frame(PROTOCOL_FRAME_SEND, 22, NULL, 0);
-    CHECK(relay_session_handle_frame(
+    CHECK(server_session_handle_frame(
               &session,
               &frame,
               response,
               sizeof(response),
-              &response_size) == RELAY_SESSION_UNEXPECTED_FRAME);
+              &response_size) == SERVER_SESSION_UNEXPECTED_FRAME);
 
     return 0;
 }

@@ -2,13 +2,13 @@
 
 A multi-user chat application written in C with Raylib for the interface.
 
-The client currently shows an animated Raylib connection form built from custom
-widgets. The project also contains binary protocol and cross-platform TCP
-modules that the client and relay share. We will build the UI and networking in
-small, reusable modules as the project grows.
+The client currently shows an animated Raylib username setup screen built from
+custom widgets. The project also contains binary protocol and cross-platform
+TCP modules that the client and server share. Version 1 focuses on private,
+one-to-one chats so the code remains practical to explain and maintain.
 
 `socket_chat` is always the Raylib GUI client. The separate
-`socket_chat_relay` program is the headless relay server.
+`socket_chat_server` program is the headless server.
 
 The interface uses the rounded [Nunito](https://fonts.google.com/specimen/Nunito)
 typeface under the SIL Open Font License included with the font file.
@@ -63,6 +63,10 @@ The included `vcpkg.json` tells vcpkg to install libsodium and SQLite during the
 CMake configure step. When using a single-configuration generator such as
 MinGW Makefiles, the program is created at `build\socket_chat.exe` instead.
 
+The GUI does not ask users for a server address. The development address and
+port are kept together in `src/core/app_config.h`; change them there when the
+server is deployed somewhere else.
+
 ## Tests
 
 ```sh
@@ -74,23 +78,23 @@ can create a small in-memory database. It does not create a file on your disk.
 The networking test opens a temporary connection on your own computer and sends
 a small message in both directions.
 
-## Basic relay
+## Basic server
 
-Start the relay on its default TCP port, 5050:
+Start the server on its default TCP port, 5050:
 
 ```sh
-./build/socket_chat_relay
+./build/socket_chat_server
 ```
 
 You can choose another port by passing it as the first argument:
 
 ```sh
-./build/socket_chat_relay 7000
+./build/socket_chat_server 7000
 ```
 
-On Windows with a Debug build, use `build\Debug\socket_chat_relay.exe`.
+On Windows with a Debug build, use `build\Debug\socket_chat_server.exe`.
 
-The current relay accepts up to 32 clients. It validates binary protocol frames,
+The current server accepts up to 32 clients. It validates binary protocol frames,
 records each connection's claimed identity from `HELLO`, and replies to `PING`
 with `PONG`. Authentication, encryption, and queued-message storage are added in
 later stages.

@@ -1,8 +1,8 @@
-#include "relay/relay_session.h"
+#include "server/server_session.h"
 
 #include <string.h>
 
-void relay_session_init(RelaySession *session)
+void server_session_init(ServerSession *session)
 {
     if (session != NULL)
     {
@@ -10,8 +10,8 @@ void relay_session_init(RelaySession *session)
     }
 }
 
-RelaySessionResult relay_session_handle_frame(
-    RelaySession *session,
+ServerSessionResult server_session_handle_frame(
+    ServerSession *session,
     const ProtocolFrame *frame,
     uint8_t *response,
     size_t response_capacity,
@@ -22,7 +22,7 @@ RelaySessionResult relay_session_handle_frame(
     if (session == NULL || frame == NULL || response == NULL ||
         response_size == NULL)
     {
-        return RELAY_SESSION_INVALID_PAYLOAD;
+        return SERVER_SESSION_INVALID_PAYLOAD;
     }
 
     *response_size = 0;
@@ -31,7 +31,7 @@ RelaySessionResult relay_session_handle_frame(
     {
         if (session->hello_received)
         {
-            return RELAY_SESSION_UNEXPECTED_FRAME;
+            return SERVER_SESSION_UNEXPECTED_FRAME;
         }
 
         if (protocol_decode_hello(
@@ -39,23 +39,23 @@ RelaySessionResult relay_session_handle_frame(
                 frame->payload_length,
                 &session->hello) != PROTOCOL_STATUS_OK)
         {
-            return RELAY_SESSION_INVALID_PAYLOAD;
+            return SERVER_SESSION_INVALID_PAYLOAD;
         }
 
         session->hello_received = true;
         session->hello_request_id = frame->request_id;
-        return RELAY_SESSION_ACCEPTED;
+        return SERVER_SESSION_ACCEPTED;
     }
 
     if (!session->hello_received)
     {
-        return RELAY_SESSION_UNEXPECTED_FRAME;
+        return SERVER_SESSION_UNEXPECTED_FRAME;
     }
 
     if (frame->type != PROTOCOL_FRAME_PING &&
         frame->type != PROTOCOL_FRAME_PONG)
     {
-        return RELAY_SESSION_UNEXPECTED_FRAME;
+        return SERVER_SESSION_UNEXPECTED_FRAME;
     }
 
     if (protocol_decode_ping(
@@ -63,12 +63,12 @@ RelaySessionResult relay_session_handle_frame(
             frame->payload_length,
             &token) != PROTOCOL_STATUS_OK)
     {
-        return RELAY_SESSION_INVALID_PAYLOAD;
+        return SERVER_SESSION_INVALID_PAYLOAD;
     }
 
     if (frame->type == PROTOCOL_FRAME_PONG)
     {
-        return RELAY_SESSION_ACCEPTED;
+        return SERVER_SESSION_ACCEPTED;
     }
 
     {
@@ -82,7 +82,7 @@ RelaySessionResult relay_session_handle_frame(
                 token,
                 &pong_payload_size) != PROTOCOL_STATUS_OK)
         {
-            return RELAY_SESSION_INVALID_PAYLOAD;
+            return SERVER_SESSION_INVALID_PAYLOAD;
         }
 
         encode_status = protocol_encode_frame(
@@ -96,33 +96,33 @@ RelaySessionResult relay_session_handle_frame(
 
         if (encode_status == PROTOCOL_STATUS_BUFFER_TOO_SMALL)
         {
-            return RELAY_SESSION_OUTPUT_TOO_SMALL;
+            return SERVER_SESSION_OUTPUT_TOO_SMALL;
         }
 
         if (encode_status != PROTOCOL_STATUS_OK)
         {
-            return RELAY_SESSION_INVALID_PAYLOAD;
+            return SERVER_SESSION_INVALID_PAYLOAD;
         }
     }
 
-    return RELAY_SESSION_REPLY_READY;
+    return SERVER_SESSION_REPLY_READY;
 }
 
-const char *relay_session_result_string(RelaySessionResult result)
+const char *server_session_result_string(ServerSessionResult result)
 {
     switch (result)
     {
-        case RELAY_SESSION_ACCEPTED:
+        case SERVER_SESSION_ACCEPTED:
             return "accepted";
-        case RELAY_SESSION_REPLY_READY:
+        case SERVER_SESSION_REPLY_READY:
             return "reply ready";
-        case RELAY_SESSION_INVALID_PAYLOAD:
+        case SERVER_SESSION_INVALID_PAYLOAD:
             return "invalid frame payload";
-        case RELAY_SESSION_UNEXPECTED_FRAME:
+        case SERVER_SESSION_UNEXPECTED_FRAME:
             return "unexpected frame";
-        case RELAY_SESSION_OUTPUT_TOO_SMALL:
+        case SERVER_SESSION_OUTPUT_TOO_SMALL:
             return "response buffer too small";
         default:
-            return "unknown relay session result";
+            return "unknown server session result";
     }
 }

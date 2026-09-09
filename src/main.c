@@ -1,6 +1,6 @@
 #include <raylib.h>
 
-#include "client/connection_screen.h"
+#include "client/onboarding_screen.h"
 #include "core/dependencies.h"
 #include "ui/ui_font.h"
 
@@ -10,7 +10,7 @@ int main(void)
 {
     const int initialWindowWidth = 960;
     const int initialWindowHeight = 600;
-    ConnectionScreen connection_screen;
+    OnboardingScreen onboarding_screen;
 
     if (!dependencies_initialize())
     {
@@ -31,20 +31,20 @@ int main(void)
     SetWindowMinSize(640, 540);
     SetTargetFPS(60);
     ui_font_load();
-    connection_screen_init(&connection_screen);
+    onboarding_screen_init(&onboarding_screen);
 
     while (!WindowShouldClose())
     {
-        bool connect_requested;
+        bool account_requested;
 
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
 
         BeginDrawing();
-        connect_requested = connection_screen_draw(&connection_screen);
+        account_requested = onboarding_screen_draw(&onboarding_screen);
         EndDrawing();
 
-        /* The TCP connection will use this event in the next project step. */
-        (void)connect_requested;
+        /* Account registration will use this event in the next project step. */
+        (void)account_requested;
     }
 
     ui_font_unload();

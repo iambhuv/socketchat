@@ -1,11 +1,11 @@
-#include "relay/relay_server.h"
+#include "server/server.h"
+
+#include "core/app_config.h"
 
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-#define RELAY_DEFAULT_PORT 5050u
 
 static int read_port(const char *text, uint16_t *port)
 {
@@ -27,7 +27,7 @@ static int read_port(const char *text, uint16_t *port)
 
 int main(int argument_count, char **arguments)
 {
-    uint16_t port = RELAY_DEFAULT_PORT;
+    uint16_t port = APP_SERVER_PORT;
 
     if (argument_count > 2)
     {
@@ -41,5 +41,5 @@ int main(int argument_count, char **arguments)
         return 1;
     }
 
-    return relay_server_run(port);
+    return server_run(port);
 }

@@ -19,12 +19,10 @@
 #define PROTOCOL_VERSION 1u
 
 #define PROTOCOL_FRAME_HEADER_SIZE 16u
-#define PROTOCOL_MAX_RELAY_PAYLOAD (256u * 1024u)
+#define PROTOCOL_MAX_SERVER_PAYLOAD (256u * 1024u)
 #define PROTOCOL_MAX_PACKET_SIZE (128u * 1024u)
 #define PROTOCOL_MAX_TEXT_SIZE (64u * 1024u)
 #define PROTOCOL_MAX_ERROR_MESSAGE_SIZE 512u
-#define PROTOCOL_MAX_ROOM_NAME_SIZE 64u
-#define PROTOCOL_MAX_ROOM_MEMBERS 64u
 #define PROTOCOL_AEAD_TAG_SIZE 16u
 
 #define PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE 32u
@@ -40,15 +38,14 @@
 
 #define PROTOCOL_E2E_HEADER_SIZE 108u
 #define PROTOCOL_E2E_SIGNATURE_SIZE 64u
-#define PROTOCOL_CHAT_KEY_PAYLOAD_SIZE 101u
-#define PROTOCOL_ENCRYPTED_PAYLOAD_HEADER_SIZE 60u
+#define PROTOCOL_CHAT_KEY_PAYLOAD_SIZE 100u
+#define PROTOCOL_ENCRYPTED_PAYLOAD_HEADER_SIZE 52u
 #define PROTOCOL_CONTENT_HEADER_SIZE 8u
-#define PROTOCOL_ROOM_MEMBER_SIZE 132u
 #define PROTOCOL_HELLO_SIZE 96u
 #define PROTOCOL_CHALLENGE_PAYLOAD_SIZE 160u
 #define PROTOCOL_TRANSPORT_HEADER_SIZE 12u
 #define PROTOCOL_MAX_TRANSPORT_CIPHERTEXT \
-    (PROTOCOL_FRAME_HEADER_SIZE + PROTOCOL_MAX_RELAY_PAYLOAD + PROTOCOL_AEAD_TAG_SIZE)
+    (PROTOCOL_FRAME_HEADER_SIZE + PROTOCOL_MAX_SERVER_PAYLOAD + PROTOCOL_AEAD_TAG_SIZE)
 
 typedef enum ProtocolStatus
 {
@@ -89,12 +86,6 @@ typedef enum ProtocolPacketKind
     PROTOCOL_PACKET_ENCRYPTED_MESSAGE = 0x03
 } ProtocolPacketKind;
 
-typedef enum ProtocolChatKind
-{
-    PROTOCOL_CHAT_DIRECT = 0x01,
-    PROTOCOL_CHAT_ROOM = 0x02
-} ProtocolChatKind;
-
 typedef enum ProtocolAcknowledgeResult
 {
     PROTOCOL_ACK_STORED = 0x01,
@@ -106,7 +97,6 @@ typedef enum ProtocolContentType
 {
     PROTOCOL_CONTENT_TEXT = 0x01,
     PROTOCOL_CONTENT_DELIVERY_RECEIPT = 0x02,
-    PROTOCOL_CONTENT_ROOM_SNAPSHOT = 0x10,
     PROTOCOL_CONTENT_CHAT_KEY_UPDATE = 0x11,
     PROTOCOL_CONTENT_CHAT_LEAVE = 0x12
 } ProtocolContentType;
@@ -183,7 +173,7 @@ typedef struct ProtocolDeliver
     uint64_t delivery_id;
     uint8_t packet_id[PROTOCOL_PACKET_ID_SIZE];
     uint8_t sender_id[PROTOCOL_IDENTITY_ID_SIZE];
-    uint64_t relay_received_at_unix_ms;
+    uint64_t server_received_at_unix_ms;
     const uint8_t *packet;
     uint32_t packet_length;
 } ProtocolDeliver;
@@ -219,7 +209,6 @@ typedef struct ProtocolPacket
 
 typedef struct ProtocolChatKey
 {
-    ProtocolChatKind chat_kind;
     uint32_t key_version;
     uint8_t public_key[PROTOCOL_CHAT_PUBLIC_KEY_SIZE];
     uint8_t signature[PROTOCOL_SIGNATURE_SIZE];
@@ -230,7 +219,6 @@ typedef struct ProtocolEncryptedMessage
     uint8_t message_id[PROTOCOL_MESSAGE_ID_SIZE];
     uint32_t sender_key_version;
     uint32_t recipient_key_version;
-    uint64_t chat_revision;
     uint8_t nonce[PROTOCOL_NONCE_SIZE];
     const uint8_t *ciphertext;
     uint32_t ciphertext_length;
@@ -259,50 +247,17 @@ typedef struct ProtocolDeliveryReceipt
     uint64_t recipient_timestamp_unix_ms;
 } ProtocolDeliveryReceipt;
 
-typedef struct ProtocolRoomMember
-{
-    uint8_t identity_public_key[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE];
-    uint32_t key_version;
-    uint8_t chat_public_key[PROTOCOL_CHAT_PUBLIC_KEY_SIZE];
-    uint8_t chat_key_signature[PROTOCOL_SIGNATURE_SIZE];
-} ProtocolRoomMember;
-
-typedef struct ProtocolRoomSnapshot
-{
-    uint64_t revision;
-    uint8_t previous_snapshot_hash[PROTOCOL_IDENTITY_ID_SIZE];
-    uint8_t owner_public_key[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE];
-    const uint8_t *room_name;
-    uint16_t room_name_length;
-    const ProtocolRoomMember *members;
-    uint16_t member_count;
-} ProtocolRoomSnapshot;
-
-typedef struct ProtocolRoomSnapshotView
-{
-    uint64_t revision;
-    uint8_t previous_snapshot_hash[PROTOCOL_IDENTITY_ID_SIZE];
-    uint8_t owner_public_key[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE];
-    const uint8_t *room_name;
-    uint16_t room_name_length;
-    const uint8_t *encoded_members;
-    uint16_t member_count;
-    const uint8_t *owner_signature;
-    const uint8_t *signed_bytes;
-    size_t signed_length;
-} ProtocolRoomSnapshotView;
-
 const char *protocol_status_string(ProtocolStatus status);
 
 /*
  * Connection setup:
  *   1. Client sends an unencrypted HELLO frame.
- *   2. Relay signs the complete handshake and sends CHALLENGE.
- *   3. Client checks the signature against its pinned relay public key.
+ *   2. Server signs the complete handshake and sends CHALLENGE.
+ *   3. Client checks the signature against its pinned server public key.
  *   4. Client signs the client-auth transcript and sends AUTHENTICATE.
  *   5. Both sides derive directional keys from the ephemeral X25519 keys.
- *   6. Every later relay frame is AEAD-encrypted inside a transport record.
- *   7. The relay's first encrypted frame is AUTHENTICATED.
+ *   6. Every later server frame is AEAD-encrypted inside a transport record.
+ *   7. The server's first encrypted frame is AUTHENTICATED.
  *
  * crypto_kx provides a different key for each direction. Each direction owns
  * a separate sequence counter starting at zero. A receiver accepts exactly
@@ -310,7 +265,7 @@ const char *protocol_status_string(ProtocolStatus status);
  * Never use one transport key for both directions.
  */
 
-/* Relay frames */
+/* Server frames */
 size_t protocol_frame_size(uint32_t payload_length);
 ProtocolStatus protocol_encode_frame(
     uint8_t *output,
@@ -497,7 +452,6 @@ ProtocolStatus protocol_decode_packet(
 ProtocolStatus protocol_build_chat_key_signature_data(
     uint8_t *output,
     size_t output_size,
-    ProtocolChatKind chat_kind,
     const uint8_t chat_id[PROTOCOL_CHAT_ID_SIZE],
     uint32_t key_version,
     const uint8_t member_public_key[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE],
@@ -514,20 +468,18 @@ ProtocolStatus protocol_decode_chat_key_payload(
     ProtocolChatKey *chat_key);
 
 /*
- * For peer-to-peer chat keys, the smaller Ed25519 public key is always the
- * crypto_kx client and the larger key is the server. This function rejects the
- * identities if they are not supplied in that order.
+ * For a direct chat, the smaller Ed25519 public key uses the crypto_kx client
+ * role and the larger key uses the server role. This stable ordering lets both
+ * peers derive the same directional keys without extra negotiation.
  */
 ProtocolStatus protocol_build_chat_key_context_data(
     uint8_t *output,
     size_t output_size,
-    ProtocolChatKind chat_kind,
     const uint8_t chat_id[PROTOCOL_CHAT_ID_SIZE],
-    uint64_t chat_revision,
-    const uint8_t client_identity_public_key[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE],
-    uint32_t client_key_version,
-    const uint8_t server_identity_public_key[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE],
-    uint32_t server_key_version,
+    const uint8_t lower_identity_public_key[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE],
+    uint32_t lower_key_version,
+    const uint8_t higher_identity_public_key[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE],
+    uint32_t higher_key_version,
     size_t *bytes_written);
 
 /*
@@ -547,7 +499,6 @@ ProtocolStatus protocol_encode_encrypted_packet_prefix(
     const uint8_t message_id[PROTOCOL_MESSAGE_ID_SIZE],
     uint32_t sender_key_version,
     uint32_t recipient_key_version,
-    uint64_t chat_revision,
     const uint8_t nonce[PROTOCOL_NONCE_SIZE],
     uint32_t ciphertext_length,
     size_t *bytes_written);
@@ -608,36 +559,5 @@ ProtocolStatus protocol_decode_chat_leave_data(
     const uint8_t *data,
     size_t data_size,
     uint64_t *sender_timestamp_unix_ms);
-
-/* Owner-signed room membership snapshots */
-size_t protocol_room_snapshot_size(
-    uint16_t room_name_length,
-    uint16_t member_count);
-ProtocolStatus protocol_encode_unsigned_room_snapshot(
-    uint8_t *output,
-    size_t output_size,
-    const ProtocolRoomSnapshot *snapshot,
-    size_t *bytes_written);
-ProtocolStatus protocol_append_room_snapshot_signature(
-    uint8_t *snapshot,
-    size_t snapshot_capacity,
-    size_t unsigned_snapshot_size,
-    const uint8_t signature[PROTOCOL_SIGNATURE_SIZE],
-    size_t *bytes_written);
-ProtocolStatus protocol_build_room_snapshot_signature_data(
-    uint8_t *output,
-    size_t output_size,
-    const uint8_t chat_id[PROTOCOL_CHAT_ID_SIZE],
-    const uint8_t *unsigned_snapshot,
-    size_t unsigned_snapshot_size,
-    size_t *bytes_written);
-ProtocolStatus protocol_decode_room_snapshot(
-    const uint8_t *data,
-    size_t data_size,
-    ProtocolRoomSnapshotView *snapshot);
-ProtocolStatus protocol_decode_room_member(
-    const ProtocolRoomSnapshotView *snapshot,
-    uint16_t member_index,
-    ProtocolRoomMember *member);
 
 #endif

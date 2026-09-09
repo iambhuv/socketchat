@@ -1,8 +1,8 @@
-#include "relay/relay_server.h"
+#include "server/server.h"
 
 #include "net/net.h"
 #include "protocol/protocol.h"
-#include "relay/relay_session.h"
+#include "server/server_session.h"
 
 #include <signal.h>
 #include <stdbool.h>
@@ -11,47 +11,47 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define RELAY_MAX_CLIENTS 32u
-#define RELAY_LISTEN_BACKLOG 16
-#define RELAY_WAIT_MILLISECONDS 250
-#define RELAY_CLIENT_BUFFER_SIZE \
-    (PROTOCOL_FRAME_HEADER_SIZE + PROTOCOL_MAX_RELAY_PAYLOAD)
+#define SERVER_MAX_CLIENTS 32u
+#define SERVER_LISTEN_BACKLOG 16
+#define SERVER_WAIT_MILLISECONDS 250
+#define SERVER_CLIENT_BUFFER_SIZE \
+    (PROTOCOL_FRAME_HEADER_SIZE + PROTOCOL_MAX_SERVER_PAYLOAD)
 
-typedef struct RelayClient
+typedef struct ServerClient
 {
     NetSocket socket;
-    RelaySession session;
+    ServerSession session;
     uint8_t *read_buffer;
     size_t buffered_size;
-} RelayClient;
+} ServerClient;
 
-static volatile sig_atomic_t relay_stop_requested = 0;
+static volatile sig_atomic_t server_stop_requested = 0;
 
-static void relay_handle_stop_signal(int signal_number)
+static void server_handle_stop_signal(int signal_number)
 {
     (void)signal_number;
-    relay_stop_requested = 1;
+    server_stop_requested = 1;
 }
 
-static void relay_initialize_clients(RelayClient clients[RELAY_MAX_CLIENTS])
+static void server_initialize_clients(ServerClient clients[SERVER_MAX_CLIENTS])
 {
     size_t index;
 
-    for (index = 0; index < RELAY_MAX_CLIENTS; ++index)
+    for (index = 0; index < SERVER_MAX_CLIENTS; ++index)
     {
         clients[index].socket = net_socket_invalid();
         clients[index].read_buffer = NULL;
         clients[index].buffered_size = 0;
-        relay_session_init(&clients[index].session);
+        server_session_init(&clients[index].session);
     }
 }
 
-static void relay_disconnect_client(
-    RelayClient clients[RELAY_MAX_CLIENTS],
+static void server_disconnect_client(
+    ServerClient clients[SERVER_MAX_CLIENTS],
     size_t client_index,
     const char *reason)
 {
-    RelayClient *client = &clients[client_index];
+    ServerClient *client = &clients[client_index];
 
     if (!net_socket_is_valid(client->socket))
     {
@@ -63,25 +63,25 @@ static void relay_disconnect_client(
     free(client->read_buffer);
     client->read_buffer = NULL;
     client->buffered_size = 0;
-    relay_session_init(&client->session);
+    server_session_init(&client->session);
 }
 
-static bool relay_add_client(
-    RelayClient clients[RELAY_MAX_CLIENTS],
+static bool server_add_client(
+    ServerClient clients[SERVER_MAX_CLIENTS],
     NetSocket socket)
 {
     size_t index;
 
-    for (index = 0; index < RELAY_MAX_CLIENTS; ++index)
+    for (index = 0; index < SERVER_MAX_CLIENTS; ++index)
     {
-        RelayClient *client = &clients[index];
+        ServerClient *client = &clients[index];
 
         if (net_socket_is_valid(client->socket))
         {
             continue;
         }
 
-        client->read_buffer = malloc(RELAY_CLIENT_BUFFER_SIZE);
+        client->read_buffer = malloc(SERVER_CLIENT_BUFFER_SIZE);
         if (client->read_buffer == NULL)
         {
             return false;
@@ -89,7 +89,7 @@ static bool relay_add_client(
 
         client->socket = socket;
         client->buffered_size = 0;
-        relay_session_init(&client->session);
+        server_session_init(&client->session);
         printf("Client %zu connected.\n", index + 1);
         return true;
     }
@@ -97,7 +97,7 @@ static bool relay_add_client(
     return false;
 }
 
-static bool relay_send_error(
+static bool server_send_error(
     NetSocket socket,
     uint32_t request_id,
     ProtocolErrorCode code,
@@ -134,7 +134,7 @@ static bool relay_send_error(
     return net_send_all(socket, frame_bytes, frame_size) == NET_STATUS_OK;
 }
 
-static void relay_print_claimed_identity(
+static void server_print_claimed_identity(
     size_t client_index,
     const uint8_t identity[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE])
 {
@@ -150,21 +150,21 @@ static void relay_print_claimed_identity(
     printf("...).\n");
 }
 
-static bool relay_handle_frame(
-    RelayClient *client,
+static bool server_handle_frame(
+    ServerClient *client,
     size_t client_index,
     const ProtocolFrame *frame)
 {
-    uint8_t response[RELAY_SESSION_MAX_RESPONSE_SIZE];
+    uint8_t response[SERVER_SESSION_MAX_RESPONSE_SIZE];
     size_t response_size;
-    RelaySessionResult result = relay_session_handle_frame(
+    ServerSessionResult result = server_session_handle_frame(
         &client->session,
         frame,
         response,
         sizeof(response),
         &response_size);
 
-    if (result == RELAY_SESSION_REPLY_READY)
+    if (result == SERVER_SESSION_REPLY_READY)
     {
         if (net_send_all(client->socket, response, response_size) != NET_STATUS_OK)
         {
@@ -175,19 +175,19 @@ static bool relay_handle_frame(
         return true;
     }
 
-    if (result != RELAY_SESSION_ACCEPTED)
+    if (result != SERVER_SESSION_ACCEPTED)
     {
-        relay_send_error(
+        server_send_error(
             client->socket,
             frame->request_id,
             PROTOCOL_ERROR_INVALID_REQUEST,
-            relay_session_result_string(result));
+            server_session_result_string(result));
         return false;
     }
 
     if (frame->type == PROTOCOL_FRAME_HELLO)
     {
-        relay_print_claimed_identity(
+        server_print_claimed_identity(
             client_index,
             client->session.hello.identity_public_key);
     }
@@ -199,34 +199,34 @@ static bool relay_handle_frame(
     return true;
 }
 
-static void relay_read_from_client(
-    RelayClient clients[RELAY_MAX_CLIENTS],
+static void server_read_from_client(
+    ServerClient clients[SERVER_MAX_CLIENTS],
     size_t client_index)
 {
-    RelayClient *client = &clients[client_index];
+    ServerClient *client = &clients[client_index];
     size_t received_size;
     NetStatus receive_status;
 
-    if (client->buffered_size == RELAY_CLIENT_BUFFER_SIZE)
+    if (client->buffered_size == SERVER_CLIENT_BUFFER_SIZE)
     {
-        relay_send_error(
+        server_send_error(
             client->socket,
             0,
             PROTOCOL_ERROR_FRAME_TOO_LARGE,
             "frame is too large");
-        relay_disconnect_client(clients, client_index, "frame is too large");
+        server_disconnect_client(clients, client_index, "frame is too large");
         return;
     }
 
     receive_status = net_receive_some(
         client->socket,
         client->read_buffer + client->buffered_size,
-        RELAY_CLIENT_BUFFER_SIZE - client->buffered_size,
+        SERVER_CLIENT_BUFFER_SIZE - client->buffered_size,
         &received_size);
 
     if (receive_status != NET_STATUS_OK)
     {
-        relay_disconnect_client(
+        server_disconnect_client(
             clients,
             client_index,
             net_status_string(receive_status));
@@ -252,21 +252,21 @@ static void relay_read_from_client(
 
         if (protocol_status != PROTOCOL_STATUS_OK)
         {
-            relay_send_error(
+            server_send_error(
                 client->socket,
                 0,
                 PROTOCOL_ERROR_MALFORMED_FRAME,
                 protocol_status_string(protocol_status));
-            relay_disconnect_client(
+            server_disconnect_client(
                 clients,
                 client_index,
                 protocol_status_string(protocol_status));
             return;
         }
 
-        if (!relay_handle_frame(client, client_index, &frame))
+        if (!server_handle_frame(client, client_index, &frame))
         {
-            relay_disconnect_client(clients, client_index, "invalid request");
+            server_disconnect_client(clients, client_index, "invalid request");
             return;
         }
 
@@ -278,9 +278,9 @@ static void relay_read_from_client(
     }
 }
 
-static void relay_accept_client(
+static void server_accept_client(
     NetSocket listening_socket,
-    RelayClient clients[RELAY_MAX_CLIENTS])
+    ServerClient clients[SERVER_MAX_CLIENTS])
 {
     NetSocket client_socket = net_socket_invalid();
     NetStatus status = net_accept(listening_socket, &client_socket);
@@ -291,18 +291,18 @@ static void relay_accept_client(
         return;
     }
 
-    if (!relay_add_client(clients, client_socket))
+    if (!server_add_client(clients, client_socket))
     {
-        fprintf(stderr, "Client rejected: relay is full or out of memory.\n");
+        fprintf(stderr, "Client rejected: server is full or out of memory.\n");
         net_close(&client_socket);
     }
 }
 
-static size_t relay_build_socket_list(
+static size_t server_build_socket_list(
     NetSocket listening_socket,
-    const RelayClient clients[RELAY_MAX_CLIENTS],
-    NetSocket sockets[RELAY_MAX_CLIENTS + 1u],
-    size_t client_indexes[RELAY_MAX_CLIENTS + 1u])
+    const ServerClient clients[SERVER_MAX_CLIENTS],
+    NetSocket sockets[SERVER_MAX_CLIENTS + 1u],
+    size_t client_indexes[SERVER_MAX_CLIENTS + 1u])
 {
     size_t socket_count = 1;
     size_t client_index;
@@ -310,7 +310,7 @@ static size_t relay_build_socket_list(
     sockets[0] = listening_socket;
     client_indexes[0] = 0;
 
-    for (client_index = 0; client_index < RELAY_MAX_CLIENTS; ++client_index)
+    for (client_index = 0; client_index < SERVER_MAX_CLIENTS; ++client_index)
     {
         if (net_socket_is_valid(clients[client_index].socket))
         {
@@ -323,14 +323,14 @@ static size_t relay_build_socket_list(
     return socket_count;
 }
 
-int relay_server_run(uint16_t port)
+int server_run(uint16_t port)
 {
-    RelayClient clients[RELAY_MAX_CLIENTS];
+    ServerClient clients[SERVER_MAX_CLIENTS];
     NetSocket listening_socket = net_socket_invalid();
     int exit_code = 0;
 
-    relay_stop_requested = 0;
-    relay_initialize_clients(clients);
+    server_stop_requested = 0;
+    server_initialize_clients(clients);
 
     if (net_init() != NET_STATUS_OK)
     {
@@ -341,7 +341,7 @@ int relay_server_run(uint16_t port)
     {
         const NetStatus listen_status = net_listen(
             port,
-            RELAY_LISTEN_BACKLOG,
+            SERVER_LISTEN_BACKLOG,
             &listening_socket);
 
         if (listen_status != NET_STATUS_OK)
@@ -356,19 +356,19 @@ int relay_server_run(uint16_t port)
         }
     }
 
-    signal(SIGINT, relay_handle_stop_signal);
-    signal(SIGTERM, relay_handle_stop_signal);
+    signal(SIGINT, server_handle_stop_signal);
+    signal(SIGTERM, server_handle_stop_signal);
 
-    printf("Relay listening on 0.0.0.0:%u\n", (unsigned int)port);
+    printf("Server listening on 0.0.0.0:%u\n", (unsigned int)port);
     printf("Press Ctrl+C to stop.\n");
 
-    while (!relay_stop_requested)
+    while (!server_stop_requested)
     {
-        NetSocket sockets[RELAY_MAX_CLIENTS + 1u];
-        size_t client_indexes[RELAY_MAX_CLIENTS + 1u];
-        bool readable[RELAY_MAX_CLIENTS + 1u];
+        NetSocket sockets[SERVER_MAX_CLIENTS + 1u];
+        size_t client_indexes[SERVER_MAX_CLIENTS + 1u];
+        bool readable[SERVER_MAX_CLIENTS + 1u];
         size_t socket_index;
-        const size_t socket_count = relay_build_socket_list(
+        const size_t socket_count = server_build_socket_list(
             listening_socket,
             clients,
             sockets,
@@ -376,12 +376,12 @@ int relay_server_run(uint16_t port)
         const NetStatus wait_status = net_wait_readable(
             sockets,
             socket_count,
-            RELAY_WAIT_MILLISECONDS,
+            SERVER_WAIT_MILLISECONDS,
             readable);
 
         if (wait_status != NET_STATUS_OK)
         {
-            if (relay_stop_requested)
+            if (server_stop_requested)
             {
                 break;
             }
@@ -394,14 +394,14 @@ int relay_server_run(uint16_t port)
 
         if (readable[0])
         {
-            relay_accept_client(listening_socket, clients);
+            server_accept_client(listening_socket, clients);
         }
 
         for (socket_index = 1; socket_index < socket_count; ++socket_index)
         {
             if (readable[socket_index])
             {
-                relay_read_from_client(
+                server_read_from_client(
                     clients,
                     client_indexes[socket_index]);
             }
@@ -411,14 +411,14 @@ int relay_server_run(uint16_t port)
     {
         size_t client_index;
 
-        for (client_index = 0; client_index < RELAY_MAX_CLIENTS; ++client_index)
+        for (client_index = 0; client_index < SERVER_MAX_CLIENTS; ++client_index)
         {
-            relay_disconnect_client(clients, client_index, "relay stopped");
+            server_disconnect_client(clients, client_index, "server stopped");
         }
     }
 
     net_close(&listening_socket);
     net_shutdown();
-    printf("Relay stopped.\n");
+    printf("Server stopped.\n");
     return exit_code;
 }
