@@ -78,9 +78,35 @@ target_include_directories(chat_relay PUBLIC src)
 target_link_libraries(chat_relay PUBLIC chat_net chat_protocol)
 socket_chat_enable_warnings(chat_relay)
 
+add_library(chat_ui STATIC
+    src/ui/ui_animation.c
+    src/ui/ui_font.c
+    src/ui/ui_theme.c
+    src/ui/ui_widgets.c
+)
+target_include_directories(chat_ui PUBLIC src)
+socket_chat_enable_warnings(chat_ui)
+
+add_library(chat_client_ui STATIC
+    src/client/connection_screen.c
+)
+target_include_directories(chat_client_ui PUBLIC src)
+target_link_libraries(chat_client_ui PUBLIC chat_ui)
+socket_chat_enable_warnings(chat_client_ui)
+
 add_executable(socket_chat src/main.c)
-target_link_libraries(socket_chat PRIVATE chat_dependencies chat_protocol)
+target_link_libraries(socket_chat PRIVATE
+    chat_client_ui
+    chat_dependencies
+    chat_protocol
+)
 socket_chat_enable_warnings(socket_chat)
+
+add_custom_command(TARGET socket_chat POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+        "$<TARGET_FILE_DIR:socket_chat>/assets"
+)
 
 add_executable(socket_chat_relay src/relay/relay_main.c)
 target_link_libraries(socket_chat_relay PRIVATE chat_relay)
@@ -111,6 +137,7 @@ endif()
 find_package(raylib 6.0 QUIET)
 
 if(raylib_FOUND)
+    target_link_libraries(chat_ui PUBLIC raylib)
     target_link_libraries(socket_chat PRIVATE raylib)
 else()
     include(FetchContent)
@@ -125,5 +152,6 @@ else()
     )
 
     FetchContent_MakeAvailable(raylib)
+    target_link_libraries(chat_ui PUBLIC raylib)
     target_link_libraries(socket_chat PRIVATE raylib)
 endif()

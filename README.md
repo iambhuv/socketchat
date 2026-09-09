@@ -2,13 +2,16 @@
 
 A multi-user chat application written in C with Raylib for the interface.
 
-The project currently opens a blank, resizable window and contains binary
-protocol and cross-platform TCP modules that the future client and relay will
-share. We will build the UI and networking in small, reusable modules as the
-project grows.
+The client currently shows an animated Raylib connection form built from custom
+widgets. The project also contains binary protocol and cross-platform TCP
+modules that the client and relay share. We will build the UI and networking in
+small, reusable modules as the project grows.
 
 `socket_chat` is always the Raylib GUI client. The separate
 `socket_chat_relay` program is the headless relay server.
+
+The interface uses the rounded [Nunito](https://fonts.google.com/specimen/Nunito)
+typeface under the SIL Open Font License included with the font file.
 
 ## Build
 
