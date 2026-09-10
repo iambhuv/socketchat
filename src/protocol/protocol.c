@@ -69,6 +69,10 @@ static int is_frame_type_valid(uint8_t type)
         case PROTOCOL_FRAME_CHALLENGE:
         case PROTOCOL_FRAME_AUTHENTICATE:
         case PROTOCOL_FRAME_AUTHENTICATED:
+        case PROTOCOL_FRAME_REGISTER_USERNAME:
+        case PROTOCOL_FRAME_REGISTER_USERNAME_RESULT:
+        case PROTOCOL_FRAME_LOOKUP_USERNAME:
+        case PROTOCOL_FRAME_LOOKUP_USERNAME_RESULT:
         case PROTOCOL_FRAME_SEND:
         case PROTOCOL_FRAME_SEND_ACCEPTED:
         case PROTOCOL_FRAME_DELIVER:
@@ -95,6 +99,20 @@ static int is_acknowledge_result_valid(uint8_t result)
     return result == PROTOCOL_ACK_STORED ||
            result == PROTOCOL_ACK_DUPLICATE ||
            result == PROTOCOL_ACK_REJECTED;
+}
+
+static int is_username_registration_result_valid(uint8_t result)
+{
+    return result == PROTOCOL_USERNAME_REGISTERED ||
+           result == PROTOCOL_USERNAME_TAKEN ||
+           result == PROTOCOL_USERNAME_INVALID ||
+           result == PROTOCOL_IDENTITY_ALREADY_REGISTERED;
+}
+
+static int is_username_lookup_status_valid(uint8_t status)
+{
+    return status == PROTOCOL_USERNAME_FOUND ||
+           status == PROTOCOL_USERNAME_NOT_FOUND;
 }
 
 static int is_content_type_valid(uint8_t type)
@@ -783,6 +801,293 @@ ProtocolStatus protocol_decode_authenticated(
 
     memcpy(message->identity_id, payload, PROTOCOL_IDENTITY_ID_SIZE);
     message->queued_packet_count = read_u32(payload + PROTOCOL_IDENTITY_ID_SIZE);
+
+    return PROTOCOL_STATUS_OK;
+}
+
+int protocol_username_is_valid(const char *username, size_t username_length)
+{
+    size_t index;
+
+    if (username == NULL || username_length < PROTOCOL_MIN_USERNAME_SIZE ||
+        username_length > PROTOCOL_MAX_USERNAME_SIZE)
+    {
+        return 0;
+    }
+
+    for (index = 0; index < username_length; ++index)
+    {
+        const unsigned char character = (unsigned char)username[index];
+
+        if (!((character >= 'a' && character <= 'z') ||
+              (character >= '0' && character <= '9') || character == '_'))
+        {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+size_t protocol_username_payload_size(uint8_t username_length)
+{
+    if (username_length < PROTOCOL_MIN_USERNAME_SIZE ||
+        username_length > PROTOCOL_MAX_USERNAME_SIZE)
+    {
+        return 0;
+    }
+
+    return 1u + (size_t)username_length;
+}
+
+ProtocolStatus protocol_encode_username(
+    uint8_t *output,
+    size_t output_size,
+    const ProtocolUsername *username,
+    size_t *bytes_written)
+{
+    size_t required_size;
+
+    if (output == NULL || username == NULL || username->text == NULL ||
+        bytes_written == NULL)
+    {
+        return PROTOCOL_STATUS_INVALID_ARGUMENT;
+    }
+
+    required_size = protocol_username_payload_size(username->length);
+    if (required_size == 0)
+    {
+        return PROTOCOL_STATUS_INVALID_LENGTH;
+    }
+
+    if (!protocol_username_is_valid(username->text, username->length))
+    {
+        return PROTOCOL_STATUS_INVALID_VALUE;
+    }
+
+    if (output_size < required_size)
+    {
+        return PROTOCOL_STATUS_BUFFER_TOO_SMALL;
+    }
+
+    output[0] = username->length;
+    memcpy(output + 1, username->text, username->length);
+    *bytes_written = required_size;
+    return PROTOCOL_STATUS_OK;
+}
+
+ProtocolStatus protocol_decode_username(
+    const uint8_t *payload,
+    size_t payload_size,
+    ProtocolUsername *username)
+{
+    uint8_t username_length;
+
+    if (payload == NULL || username == NULL)
+    {
+        return PROTOCOL_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (payload_size < 1u)
+    {
+        return PROTOCOL_STATUS_INVALID_LENGTH;
+    }
+
+    username_length = payload[0];
+    if (protocol_username_payload_size(username_length) != payload_size)
+    {
+        return PROTOCOL_STATUS_INVALID_LENGTH;
+    }
+
+    if (!protocol_username_is_valid((const char *)(payload + 1), username_length))
+    {
+        return PROTOCOL_STATUS_INVALID_VALUE;
+    }
+
+    username->text = (const char *)(payload + 1);
+    username->length = username_length;
+    return PROTOCOL_STATUS_OK;
+}
+
+ProtocolStatus protocol_encode_username_registration_result(
+    uint8_t *output,
+    size_t output_size,
+    ProtocolUsernameRegistrationResult result,
+    size_t *bytes_written)
+{
+    if (output == NULL || bytes_written == NULL)
+    {
+        return PROTOCOL_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!is_username_registration_result_valid((uint8_t)result))
+    {
+        return PROTOCOL_STATUS_INVALID_TYPE;
+    }
+
+    if (output_size < 1u)
+    {
+        return PROTOCOL_STATUS_BUFFER_TOO_SMALL;
+    }
+
+    output[0] = (uint8_t)result;
+    *bytes_written = 1u;
+    return PROTOCOL_STATUS_OK;
+}
+
+ProtocolStatus protocol_decode_username_registration_result(
+    const uint8_t *payload,
+    size_t payload_size,
+    ProtocolUsernameRegistrationResult *result)
+{
+    if (payload == NULL || result == NULL)
+    {
+        return PROTOCOL_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (payload_size != 1u)
+    {
+        return PROTOCOL_STATUS_INVALID_LENGTH;
+    }
+
+    if (!is_username_registration_result_valid(payload[0]))
+    {
+        return PROTOCOL_STATUS_INVALID_TYPE;
+    }
+
+    *result = (ProtocolUsernameRegistrationResult)payload[0];
+    return PROTOCOL_STATUS_OK;
+}
+
+size_t protocol_username_lookup_result_size(
+    ProtocolUsernameLookupStatus status,
+    uint8_t username_length)
+{
+    size_t required_size;
+
+    if (!is_username_lookup_status_valid((uint8_t)status) ||
+        protocol_username_payload_size(username_length) == 0)
+    {
+        return 0;
+    }
+
+    required_size = 2u + (size_t)username_length;
+    if (status == PROTOCOL_USERNAME_FOUND)
+    {
+        required_size += PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE;
+    }
+
+    return required_size;
+}
+
+ProtocolStatus protocol_encode_username_lookup_result(
+    uint8_t *output,
+    size_t output_size,
+    const ProtocolUsernameLookupResult *result,
+    size_t *bytes_written)
+{
+    size_t required_size;
+
+    if (output == NULL || result == NULL || result->username.text == NULL ||
+        bytes_written == NULL)
+    {
+        return PROTOCOL_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (!is_username_lookup_status_valid((uint8_t)result->status))
+    {
+        return PROTOCOL_STATUS_INVALID_TYPE;
+    }
+
+    required_size = protocol_username_lookup_result_size(
+        result->status,
+        result->username.length);
+    if (required_size == 0)
+    {
+        return PROTOCOL_STATUS_INVALID_LENGTH;
+    }
+
+    if (!protocol_username_is_valid(
+            result->username.text,
+            result->username.length))
+    {
+        return PROTOCOL_STATUS_INVALID_VALUE;
+    }
+
+    if (output_size < required_size)
+    {
+        return PROTOCOL_STATUS_BUFFER_TOO_SMALL;
+    }
+
+    output[0] = (uint8_t)result->status;
+    output[1] = result->username.length;
+    memcpy(output + 2, result->username.text, result->username.length);
+
+    if (result->status == PROTOCOL_USERNAME_FOUND)
+    {
+        memcpy(
+            output + 2u + result->username.length,
+            result->identity_public_key,
+            PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE);
+    }
+
+    *bytes_written = required_size;
+    return PROTOCOL_STATUS_OK;
+}
+
+ProtocolStatus protocol_decode_username_lookup_result(
+    const uint8_t *payload,
+    size_t payload_size,
+    ProtocolUsernameLookupResult *result)
+{
+    ProtocolUsernameLookupStatus status;
+    uint8_t username_length;
+
+    if (payload == NULL || result == NULL)
+    {
+        return PROTOCOL_STATUS_INVALID_ARGUMENT;
+    }
+
+    if (payload_size < 2u)
+    {
+        return PROTOCOL_STATUS_INVALID_LENGTH;
+    }
+
+    if (!is_username_lookup_status_valid(payload[0]))
+    {
+        return PROTOCOL_STATUS_INVALID_TYPE;
+    }
+
+    status = (ProtocolUsernameLookupStatus)payload[0];
+    username_length = payload[1];
+    if (protocol_username_lookup_result_size(status, username_length) !=
+        payload_size)
+    {
+        return PROTOCOL_STATUS_INVALID_LENGTH;
+    }
+
+    if (!protocol_username_is_valid(
+            (const char *)(payload + 2),
+            username_length))
+    {
+        return PROTOCOL_STATUS_INVALID_VALUE;
+    }
+
+    result->status = status;
+    result->username.text = (const char *)(payload + 2);
+    result->username.length = username_length;
+
+    if (status == PROTOCOL_USERNAME_FOUND)
+    {
+        memcpy(
+            result->identity_public_key,
+            payload + 2u + username_length,
+            PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE);
+    }
+    else
+    {
+        memset(result->identity_public_key, 0, PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE);
+    }
 
     return PROTOCOL_STATUS_OK;
 }

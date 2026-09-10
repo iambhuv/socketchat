@@ -23,6 +23,8 @@
 #define PROTOCOL_MAX_PACKET_SIZE (128u * 1024u)
 #define PROTOCOL_MAX_TEXT_SIZE (64u * 1024u)
 #define PROTOCOL_MAX_ERROR_MESSAGE_SIZE 512u
+#define PROTOCOL_MIN_USERNAME_SIZE 3u
+#define PROTOCOL_MAX_USERNAME_SIZE 24u
 #define PROTOCOL_AEAD_TAG_SIZE 16u
 
 #define PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE 32u
@@ -68,6 +70,11 @@ typedef enum ProtocolFrameType
     PROTOCOL_FRAME_AUTHENTICATE = 0x03,
     PROTOCOL_FRAME_AUTHENTICATED = 0x04,
 
+    PROTOCOL_FRAME_REGISTER_USERNAME = 0x08,
+    PROTOCOL_FRAME_REGISTER_USERNAME_RESULT = 0x09,
+    PROTOCOL_FRAME_LOOKUP_USERNAME = 0x0a,
+    PROTOCOL_FRAME_LOOKUP_USERNAME_RESULT = 0x0b,
+
     PROTOCOL_FRAME_SEND = 0x10,
     PROTOCOL_FRAME_SEND_ACCEPTED = 0x11,
     PROTOCOL_FRAME_DELIVER = 0x12,
@@ -92,6 +99,20 @@ typedef enum ProtocolAcknowledgeResult
     PROTOCOL_ACK_DUPLICATE = 0x02,
     PROTOCOL_ACK_REJECTED = 0x03
 } ProtocolAcknowledgeResult;
+
+typedef enum ProtocolUsernameRegistrationResult
+{
+    PROTOCOL_USERNAME_REGISTERED = 0x01,
+    PROTOCOL_USERNAME_TAKEN = 0x02,
+    PROTOCOL_USERNAME_INVALID = 0x03,
+    PROTOCOL_IDENTITY_ALREADY_REGISTERED = 0x04
+} ProtocolUsernameRegistrationResult;
+
+typedef enum ProtocolUsernameLookupStatus
+{
+    PROTOCOL_USERNAME_FOUND = 0x01,
+    PROTOCOL_USERNAME_NOT_FOUND = 0x02
+} ProtocolUsernameLookupStatus;
 
 typedef enum ProtocolContentType
 {
@@ -158,6 +179,20 @@ typedef struct ProtocolDeliveryReference
     uint64_t delivery_id;
     uint8_t packet_id[PROTOCOL_PACKET_ID_SIZE];
 } ProtocolDeliveryReference;
+
+typedef struct ProtocolUsername
+{
+    /* Lowercase ASCII: a-z, 0-9, and underscore. Not null-terminated on decode. */
+    const char *text;
+    uint8_t length;
+} ProtocolUsername;
+
+typedef struct ProtocolUsernameLookupResult
+{
+    ProtocolUsernameLookupStatus status;
+    ProtocolUsername username;
+    uint8_t identity_public_key[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE];
+} ProtocolUsernameLookupResult;
 
 typedef struct ProtocolSend
 {
@@ -353,6 +388,42 @@ ProtocolStatus protocol_decode_authenticated(
     const uint8_t *payload,
     size_t payload_size,
     ProtocolAuthenticated *message);
+
+/* Username messages are sent only after authentication. */
+int protocol_username_is_valid(const char *username, size_t username_length);
+size_t protocol_username_payload_size(uint8_t username_length);
+ProtocolStatus protocol_encode_username(
+    uint8_t *output,
+    size_t output_size,
+    const ProtocolUsername *username,
+    size_t *bytes_written);
+ProtocolStatus protocol_decode_username(
+    const uint8_t *payload,
+    size_t payload_size,
+    ProtocolUsername *username);
+
+ProtocolStatus protocol_encode_username_registration_result(
+    uint8_t *output,
+    size_t output_size,
+    ProtocolUsernameRegistrationResult result,
+    size_t *bytes_written);
+ProtocolStatus protocol_decode_username_registration_result(
+    const uint8_t *payload,
+    size_t payload_size,
+    ProtocolUsernameRegistrationResult *result);
+
+size_t protocol_username_lookup_result_size(
+    ProtocolUsernameLookupStatus status,
+    uint8_t username_length);
+ProtocolStatus protocol_encode_username_lookup_result(
+    uint8_t *output,
+    size_t output_size,
+    const ProtocolUsernameLookupResult *result,
+    size_t *bytes_written);
+ProtocolStatus protocol_decode_username_lookup_result(
+    const uint8_t *payload,
+    size_t payload_size,
+    ProtocolUsernameLookupResult *result);
 
 size_t protocol_send_payload_size(uint32_t packet_length);
 ProtocolStatus protocol_encode_send(

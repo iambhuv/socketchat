@@ -1,11 +1,12 @@
 #ifndef SOCKET_CHAT_ONBOARDING_SCREEN_H
 #define SOCKET_CHAT_ONBOARDING_SCREEN_H
 
+#include "protocol/protocol.h"
 #include "ui/ui_widgets.h"
 
 #include <stdbool.h>
 
-#define ONBOARDING_USERNAME_CAPACITY 25u
+#define ONBOARDING_USERNAME_CAPACITY (PROTOCOL_MAX_USERNAME_SIZE + 1u)
 
 typedef struct OnboardingScreen
 {

@@ -91,7 +91,7 @@ add_library(chat_client_ui STATIC
     src/client/onboarding_screen.c
 )
 target_include_directories(chat_client_ui PUBLIC src)
-target_link_libraries(chat_client_ui PUBLIC chat_ui)
+target_link_libraries(chat_client_ui PUBLIC chat_ui chat_protocol)
 socket_chat_enable_warnings(chat_client_ui)
 
 add_executable(socket_chat src/main.c)

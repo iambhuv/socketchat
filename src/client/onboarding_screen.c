@@ -5,32 +5,7 @@
 #include "ui/ui_theme.h"
 
 #include <math.h>
-#include <stddef.h>
 #include <string.h>
-
-static bool onboarding_username_is_valid(const char *username)
-{
-    const size_t length = strlen(username);
-    size_t index;
-
-    if (length < 3 || length >= ONBOARDING_USERNAME_CAPACITY)
-    {
-        return false;
-    }
-
-    for (index = 0; index < length; ++index)
-    {
-        const char character = username[index];
-
-        if (!((character >= 'a' && character <= 'z') ||
-              (character >= '0' && character <= '9') || character == '_'))
-        {
-            return false;
-        }
-    }
-
-    return true;
-}
 
 static void onboarding_draw_background(const UiTheme *theme)
 {
@@ -207,7 +182,7 @@ bool onboarding_screen_draw(OnboardingScreen *screen)
             "bhuvnesh_01",
             screen->username,
             sizeof(screen->username),
-            UI_TEXT_INPUT_USERNAME,
+            UI_TEXT_INPUT_NORMAL,
             screen->username_has_error,
             &screen->username_input,
             theme))
@@ -230,7 +205,9 @@ bool onboarding_screen_draw(OnboardingScreen *screen)
     if (continue_requested)
     {
         screen->username_has_error =
-            !onboarding_username_is_valid(screen->username);
+            !protocol_username_is_valid(
+                screen->username,
+                strlen(screen->username));
     }
 
     return continue_requested && !screen->username_has_error;

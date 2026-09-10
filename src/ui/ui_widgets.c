@@ -106,12 +106,6 @@ static bool ui_codepoint_is_allowed(int codepoint, UiTextInputMode mode)
         return codepoint >= '0' && codepoint <= '9';
     }
 
-    if (mode == UI_TEXT_INPUT_USERNAME)
-    {
-        return (codepoint >= 'a' && codepoint <= 'z') ||
-               (codepoint >= '0' && codepoint <= '9') || codepoint == '_';
-    }
-
     return codepoint >= 32 && codepoint != 127;
 }
 

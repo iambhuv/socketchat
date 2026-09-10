@@ -131,6 +131,102 @@ static int test_authentication_payloads(void)
     return 1;
 }
 
+static int test_username_payloads(void)
+{
+    static const char username_text[] = "alice_01";
+    static const uint8_t invalid_username[] = { 3, 'A', 'b', 'c' };
+    uint8_t username_bytes[32];
+    uint8_t registration_bytes[1];
+    uint8_t lookup_bytes[64];
+    uint8_t frame_bytes[64];
+    uint8_t empty_key[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE] = { 0 };
+    ProtocolUsername username = {
+        username_text,
+        (uint8_t)(sizeof(username_text) - 1)
+    };
+    ProtocolUsername decoded_username;
+    ProtocolUsernameRegistrationResult registration_result;
+    ProtocolUsernameLookupResult lookup_result = { 0 };
+    ProtocolUsernameLookupResult decoded_lookup;
+    ProtocolFrame decoded_frame;
+    size_t username_size = 0;
+    size_t registration_size = 0;
+    size_t lookup_size = 0;
+    size_t frame_size = 0;
+    size_t consumed = 0;
+
+    CHECK(protocol_username_is_valid(username.text, username.length));
+    CHECK(!protocol_username_is_valid("ab", 2));
+    CHECK(!protocol_username_is_valid("Alice", 5));
+    CHECK(!protocol_username_is_valid("alice-bob", 9));
+
+    CHECK(protocol_encode_username(username_bytes, sizeof(username_bytes),
+              &username, &username_size) == PROTOCOL_STATUS_OK);
+    CHECK(username_size == 1u + username.length);
+    CHECK(protocol_decode_username(username_bytes, username_size,
+              &decoded_username) == PROTOCOL_STATUS_OK);
+    CHECK(decoded_username.length == username.length);
+    CHECK(memcmp(decoded_username.text, username.text, username.length) == 0);
+
+    CHECK(protocol_encode_frame(frame_bytes, sizeof(frame_bytes),
+              PROTOCOL_FRAME_REGISTER_USERNAME, 12, username_bytes,
+              (uint32_t)username_size, &frame_size) == PROTOCOL_STATUS_OK);
+    CHECK(protocol_decode_frame(frame_bytes, frame_size, &decoded_frame,
+              &consumed) == PROTOCOL_STATUS_OK);
+    CHECK(decoded_frame.type == PROTOCOL_FRAME_REGISTER_USERNAME);
+    CHECK(decoded_frame.request_id == 12);
+
+    CHECK(protocol_encode_username_registration_result(
+              registration_bytes, sizeof(registration_bytes),
+              PROTOCOL_USERNAME_TAKEN, &registration_size) == PROTOCOL_STATUS_OK);
+    CHECK(protocol_decode_username_registration_result(
+              registration_bytes, registration_size, &registration_result) ==
+          PROTOCOL_STATUS_OK);
+    CHECK(registration_result == PROTOCOL_USERNAME_TAKEN);
+
+    lookup_result.status = PROTOCOL_USERNAME_FOUND;
+    lookup_result.username = username;
+    fill_bytes(lookup_result.identity_public_key,
+               sizeof(lookup_result.identity_public_key), 0x40);
+    CHECK(protocol_encode_username_lookup_result(lookup_bytes,
+              sizeof(lookup_bytes), &lookup_result, &lookup_size) ==
+          PROTOCOL_STATUS_OK);
+    CHECK(lookup_size == 2u + username.length +
+                         PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE);
+    CHECK(protocol_decode_username_lookup_result(lookup_bytes, lookup_size,
+              &decoded_lookup) == PROTOCOL_STATUS_OK);
+    CHECK(decoded_lookup.status == PROTOCOL_USERNAME_FOUND);
+    CHECK(memcmp(decoded_lookup.username.text, username.text, username.length) == 0);
+    CHECK(memcmp(decoded_lookup.identity_public_key,
+                 lookup_result.identity_public_key,
+                 PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE) == 0);
+
+    lookup_result.status = PROTOCOL_USERNAME_NOT_FOUND;
+    CHECK(protocol_encode_username_lookup_result(lookup_bytes,
+              sizeof(lookup_bytes), &lookup_result, &lookup_size) ==
+          PROTOCOL_STATUS_OK);
+    CHECK(lookup_size == 2u + username.length);
+    CHECK(protocol_decode_username_lookup_result(lookup_bytes, lookup_size,
+              &decoded_lookup) == PROTOCOL_STATUS_OK);
+    CHECK(decoded_lookup.status == PROTOCOL_USERNAME_NOT_FOUND);
+    CHECK(memcmp(decoded_lookup.identity_public_key, empty_key,
+                 sizeof(empty_key)) == 0);
+
+    CHECK(protocol_decode_username(invalid_username, sizeof(invalid_username),
+              &decoded_username) == PROTOCOL_STATUS_INVALID_VALUE);
+    CHECK(protocol_decode_username(username_bytes, username_size - 1,
+              &decoded_username) == PROTOCOL_STATUS_INVALID_LENGTH);
+    registration_bytes[0] = 0xff;
+    CHECK(protocol_decode_username_registration_result(
+              registration_bytes, sizeof(registration_bytes),
+              &registration_result) == PROTOCOL_STATUS_INVALID_TYPE);
+    lookup_bytes[0] = PROTOCOL_USERNAME_FOUND;
+    CHECK(protocol_decode_username_lookup_result(lookup_bytes, lookup_size,
+              &decoded_lookup) == PROTOCOL_STATUS_INVALID_LENGTH);
+
+    return 1;
+}
+
 static int test_server_payloads(void)
 {
     uint8_t packet[32];
@@ -381,6 +477,7 @@ int main(void)
 {
     CHECK(test_frame_round_trip());
     CHECK(test_authentication_payloads());
+    CHECK(test_username_payloads());
     CHECK(test_server_payloads());
     CHECK(test_chat_key_packet());
     CHECK(test_encrypted_message_packet());
