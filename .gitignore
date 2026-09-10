@@ -6,3 +6,8 @@ cmake-build-*/
 # Compiled programs
 socket_chat
 socket_chat.exe
+
+# Local client data
+socket_chat.db
+socket_chat.db-shm
+socket_chat.db-wal

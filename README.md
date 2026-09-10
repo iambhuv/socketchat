@@ -67,6 +67,10 @@ The GUI does not ask users for a server address. The development address and
 port are kept together in `src/core/app_config.h`; change them there when the
 server is deployed somewhere else.
 
+On first launch, the client creates `socket_chat.db` and stores a new Ed25519
+identity keypair in it. Later launches load the same identity, so the user's
+public key remains stable.
+
 ## Tests
 
 ```sh
