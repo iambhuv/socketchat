@@ -5,6 +5,7 @@
 #include "ui/ui_theme.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 static void onboarding_draw_background(const UiTheme *theme)
@@ -119,6 +120,7 @@ void onboarding_screen_init(OnboardingScreen *screen)
 
     memset(screen, 0, sizeof(*screen));
     screen->username_input.focused = true;
+    onboarding_screen_set_status(screen, UI_STATUS_OFFLINE, "Offline");
 }
 
 bool onboarding_screen_draw(OnboardingScreen *screen)
@@ -132,6 +134,7 @@ bool onboarding_screen_draw(OnboardingScreen *screen)
     Rectangle username_input;
     Rectangle continue_button;
     bool continue_requested;
+    bool can_submit;
 
     if (screen == NULL)
     {
@@ -166,11 +169,6 @@ bool onboarding_screen_draw(OnboardingScreen *screen)
 
     onboarding_draw_background(theme);
     ui_draw_panel(card, theme);
-    ui_status_badge(
-        (Rectangle){ card.x + card.width - 166.0f, card.y + 22.0f, 142.0f, 32.0f },
-        "Private account",
-        UI_STATUS_CONNECTED,
-        theme);
     onboarding_draw_chat_icon(
         (Vector2){ card.x + card.width * 0.5f, card.y + 67.0f },
         theme);
@@ -188,16 +186,25 @@ bool onboarding_screen_draw(OnboardingScreen *screen)
             theme))
     {
         screen->username_has_error = false;
+
+        if (screen->status_kind == UI_STATUS_ERROR)
+        {
+            onboarding_screen_set_status(screen, UI_STATUS_OFFLINE, "Offline");
+        }
     }
 
+    can_submit = screen->status_kind != UI_STATUS_CONNECTING &&
+                 screen->status_kind != UI_STATUS_CONNECTED;
     continue_requested = ui_button(
         continue_button,
-        "Create my account",
-        true,
+        screen->status_kind == UI_STATUS_CONNECTED
+            ? "Server reached"
+            : "Create my account",
+        can_submit,
         &screen->continue_button,
         theme);
 
-    if (IsKeyPressed(KEY_ENTER))
+    if (can_submit && IsKeyPressed(KEY_ENTER))
     {
         continue_requested = true;
     }
@@ -208,7 +215,19 @@ bool onboarding_screen_draw(OnboardingScreen *screen)
             !protocol_username_is_valid(
                 screen->username,
                 strlen(screen->username));
+
+        onboarding_screen_set_status(
+            screen,
+            screen->username_has_error ? UI_STATUS_ERROR : UI_STATUS_CONNECTING,
+            screen->username_has_error ? "Check username" : "Connecting");
     }
+
+    /* Draw this last so a button click updates the badge in the same frame. */
+    ui_status_badge(
+        (Rectangle){ card.x + card.width - 156.0f, card.y + 22.0f, 132.0f, 32.0f },
+        screen->status_text,
+        screen->status_kind,
+        theme);
 
     return continue_requested && !screen->username_has_error;
 }
@@ -216,4 +235,18 @@ bool onboarding_screen_draw(OnboardingScreen *screen)
 const char *onboarding_screen_username(const OnboardingScreen *screen)
 {
     return screen == NULL ? "" : screen->username;
+}
+
+void onboarding_screen_set_status(
+    OnboardingScreen *screen,
+    UiStatusKind kind,
+    const char *text)
+{
+    if (screen == NULL || text == NULL)
+    {
+        return;
+    }
+
+    screen->status_kind = kind;
+    snprintf(screen->status_text, sizeof(screen->status_text), "%s", text);
 }

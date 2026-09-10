@@ -1,5 +1,6 @@
 #include <raylib.h>
 
+#include "client/client_connection.h"
 #include "client/client_database.h"
 #include "client/onboarding_screen.h"
 #include "core/app_config.h"
@@ -14,6 +15,7 @@ int main(void)
     const int initialWindowHeight = 600;
     ClientDatabase database = { 0 };
     ClientDatabaseStatus database_status;
+    ClientConnection connection;
     ClientIdentity identity;
     bool identity_was_created;
     OnboardingScreen onboarding_screen;
@@ -23,6 +25,15 @@ int main(void)
         fprintf(stderr, "Could not initialize libsodium or SQLite.\n");
         return 1;
     }
+
+    if (net_init() != NET_STATUS_OK)
+    {
+        fprintf(stderr, "Could not initialize networking.\n");
+        dependencies_shutdown();
+        return 1;
+    }
+
+    client_connection_init(&connection);
 
     database_status = client_database_open(
         &database,
@@ -42,6 +53,7 @@ int main(void)
             "Could not initialize client identity: %s.\n",
             client_database_status_string(database_status));
         client_database_close(&database);
+        net_shutdown();
         dependencies_shutdown();
         return 1;
     }
@@ -56,6 +68,7 @@ int main(void)
         fprintf(stderr, "Could not create the Raylib window.\n");
         client_identity_clear(&identity);
         client_database_close(&database);
+        net_shutdown();
         dependencies_shutdown();
         return 1;
     }
@@ -75,14 +88,43 @@ int main(void)
         account_requested = onboarding_screen_draw(&onboarding_screen);
         EndDrawing();
 
-        /* Account registration will use this event in the next project step. */
-        (void)account_requested;
+        if (account_requested)
+        {
+            const ClientConnectionStatus connection_status =
+                client_connection_connect(
+                    &connection,
+                    APP_SERVER_HOST,
+                    APP_SERVER_PORT,
+                    &identity);
+
+            if (connection_status == CLIENT_CONNECTION_OK)
+            {
+                onboarding_screen_set_status(
+                    &onboarding_screen,
+                    UI_STATUS_CONNECTED,
+                    "Connected");
+                printf("Connected to the server and sent HELLO.\n");
+            }
+            else
+            {
+                onboarding_screen_set_status(
+                    &onboarding_screen,
+                    UI_STATUS_ERROR,
+                    "Server offline");
+                fprintf(
+                    stderr,
+                    "Could not connect: %s.\n",
+                    client_connection_status_string(connection_status));
+            }
+        }
     }
 
     ui_font_unload();
     CloseWindow();
+    client_connection_close(&connection);
     client_identity_clear(&identity);
     client_database_close(&database);
+    net_shutdown();
     dependencies_shutdown();
 
     return 0;

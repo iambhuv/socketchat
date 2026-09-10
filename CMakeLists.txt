@@ -54,11 +54,16 @@ target_link_libraries(chat_dependencies PUBLIC
 socket_chat_enable_warnings(chat_dependencies)
 
 add_library(chat_client_core STATIC
+    src/client/client_connection.c
     src/client/client_database.c
     src/client/client_identity.c
 )
 target_include_directories(chat_client_core PUBLIC src)
-target_link_libraries(chat_client_core PUBLIC chat_dependencies)
+target_link_libraries(chat_client_core PUBLIC
+    chat_dependencies
+    chat_net
+    chat_protocol
+)
 socket_chat_enable_warnings(chat_client_core)
 
 add_library(chat_protocol STATIC
@@ -131,6 +136,11 @@ if(BUILD_TESTING)
     target_link_libraries(client_identity_tests PRIVATE chat_client_core)
     socket_chat_enable_warnings(client_identity_tests)
     add_test(NAME client_identity_tests COMMAND client_identity_tests)
+
+    add_executable(client_connection_tests tests/client_connection_test.c)
+    target_link_libraries(client_connection_tests PRIVATE chat_client_core)
+    socket_chat_enable_warnings(client_connection_tests)
+    add_test(NAME client_connection_tests COMMAND client_connection_tests)
 
     add_executable(protocol_tests tests/protocol_test.c)
     target_link_libraries(protocol_tests PRIVATE chat_protocol)

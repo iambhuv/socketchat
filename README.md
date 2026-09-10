@@ -102,3 +102,8 @@ The current server accepts up to 32 clients. It validates binary protocol frames
 records each connection's claimed identity from `HELLO`, and replies to `PING`
 with `PONG`. Authentication, encryption, and queued-message storage are added in
 later stages.
+
+With the server running, enter a valid username in the Raylib client and press
+**Create my account**. The client connects to the configured address and sends a
+`HELLO` containing its public identity, a fresh nonce, and a fresh ephemeral
+X25519 public key. Username registration begins after authentication is added.
