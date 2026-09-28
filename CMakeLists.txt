@@ -101,6 +101,7 @@ target_include_directories(chat_ui PUBLIC src)
 socket_chat_enable_warnings(chat_ui)
 
 add_library(chat_client_ui STATIC
+    src/client/chat_screen.c
     src/client/onboarding_screen.c
 )
 target_include_directories(chat_client_ui PUBLIC src)

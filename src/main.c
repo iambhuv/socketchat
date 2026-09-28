@@ -3,6 +3,7 @@
 #include "client/client_connection.h"
 #include "client/client_database.h"
 #include "client/onboarding_screen.h"
+#include "client/chat_screen.h"
 #include "core/app_config.h"
 #include "core/dependencies.h"
 #include "ui/ui_font.h"
@@ -18,6 +19,8 @@ int main(void)
     ClientConnection connection;
     ClientIdentity identity;
     bool identity_was_created;
+    bool chat_open = false;
+    ChatScreen chat_screen;
     OnboardingScreen onboarding_screen;
 
     if (!dependencies_initialize())
@@ -77,6 +80,7 @@ int main(void)
     SetTargetFPS(60);
     ui_font_load();
     onboarding_screen_init(&onboarding_screen);
+    chat_screen_init(&chat_screen);
 
     while (!WindowShouldClose())
     {
@@ -85,7 +89,12 @@ int main(void)
         SetMouseCursor(MOUSE_CURSOR_DEFAULT);
 
         BeginDrawing();
-        account_requested = onboarding_screen_draw(&onboarding_screen);
+        account_requested = !chat_open && onboarding_screen_draw(&onboarding_screen);
+
+        if (chat_open)
+        {
+            chat_screen_draw(&chat_screen);
+        }
         EndDrawing();
 
         if (account_requested)
@@ -103,6 +112,7 @@ int main(void)
                     &onboarding_screen,
                     UI_STATUS_CONNECTED,
                     "Connected");
+                chat_open = true;
                 printf("Connected to the server and sent HELLO.\n");
             }
             else
