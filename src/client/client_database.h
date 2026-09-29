@@ -6,6 +6,8 @@
 #include <sqlite3.h>
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 typedef enum ClientDatabaseStatus
 {
@@ -25,6 +27,11 @@ typedef struct ClientDatabase
 {
     sqlite3 *connection;
 } ClientDatabase;
+
+typedef struct ClientContact
+{
+    uint8_t public_key[crypto_sign_PUBLICKEYBYTES];
+} ClientContact;
 
 ClientDatabaseStatus client_database_open(
     ClientDatabase *database,
@@ -51,6 +58,13 @@ ClientDatabaseStatus client_database_add_contact_link(
 
 ClientDatabaseStatus client_database_contact_count(
     ClientDatabase *database,
+    uint32_t *count);
+
+/* Loads contact identities in creation order so the chat UI can show them. */
+ClientDatabaseStatus client_database_list_contacts(
+    ClientDatabase *database,
+    ClientContact *contacts,
+    uint32_t capacity,
     uint32_t *count);
 
 /* Adds the owner's identity as the built-in Saved messages contact. */

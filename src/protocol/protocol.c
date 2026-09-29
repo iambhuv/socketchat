@@ -91,7 +91,8 @@ static int is_packet_kind_valid(uint8_t kind)
 {
     return kind == PROTOCOL_PACKET_CHAT_KEY_OFFER ||
            kind == PROTOCOL_PACKET_CHAT_KEY_ACCEPT ||
-           kind == PROTOCOL_PACKET_ENCRYPTED_MESSAGE;
+           kind == PROTOCOL_PACKET_ENCRYPTED_MESSAGE ||
+           kind == PROTOCOL_PACKET_TEXT_MESSAGE;
 }
 
 static int is_acknowledge_result_valid(uint8_t result)

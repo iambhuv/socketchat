@@ -9,8 +9,9 @@
 #include "ui/ui_font.h"
 
 #include <stdio.h>
+#include <string.h>
 
-int main(void)
+int main(int argc, char *argv[])
 {
     const int initialWindowWidth = 960;
     const int initialWindowHeight = 600;
@@ -22,7 +23,18 @@ int main(void)
     bool account_was_found = false;
     bool reconnect_pending;
     bool chat_open = false;
+    const char *client_database_path = APP_CLIENT_DATABASE_PATH;
     OnboardingScreen onboarding_screen;
+
+    if (argc == 3 && strcmp(argv[1], "--database") == 0 && argv[2][0] != '\0')
+    {
+        client_database_path = argv[2];
+    }
+    else if (argc != 1)
+    {
+        fprintf(stderr, "Usage: socket_chat [--database path-to-profile.db]\n");
+        return 1;
+    }
 
     if (!dependencies_initialize())
     {
@@ -41,7 +53,7 @@ int main(void)
 
     database_status = client_database_open(
         &database,
-        APP_CLIENT_DATABASE_PATH);
+        client_database_path);
     if (database_status == CLIENT_DATABASE_OK)
     {
         database_status = client_database_load_or_create_identity(
@@ -125,7 +137,7 @@ int main(void)
 
         if (chat_open)
         {
-            chat_screen_draw(&connection, &database);
+            chat_screen_draw(&connection, &database, &identity);
         }
         EndDrawing();
 

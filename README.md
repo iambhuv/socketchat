@@ -71,6 +71,17 @@ On first launch, the client creates `socket_chat.db` and stores a new Ed25519
 identity keypair in it. Later launches load the same identity, so the user's
 public key remains stable.
 
+For a local two-client demo, start each copy with its own database file:
+
+```powershell
+.\build\Debug\socket_chat.exe --database alice.db
+.\build\Debug\socket_chat.exe --database bob.db
+```
+
+Use **Copy my link** in one client, then use **Add contact** in the other. Both
+clients must be connected to the same server before a direct message can be
+delivered.
+
 ## Tests
 
 ```sh
@@ -101,15 +112,18 @@ On Windows with a Debug build, use `build\Debug\socket_chat_server.exe`.
 The server accepts up to 32 clients and validates binary protocol frames. On the
 first run it creates `socket_chat_server.db` to keep its Ed25519 signing key
 across restarts. For each `HELLO`, it generates a fresh nonce and X25519 keypair,
-then returns a signed `CHALLENGE`. It prints its public key at startup for future
-client pinning. The server does not yet accept `AUTHENTICATE` or ordinary chat
-requests; client verification, encrypted transport, and message storage are the
-next stages. Keep the server database private and back it up: replacing it
-changes the server's identity.
+then returns a signed `CHALLENGE`. After client authentication it encrypts each
+transport record, routes signed direct-text packets to connected recipients, and
+expects a delivery acknowledgement. Messages are live-only in this stage: an
+offline recipient is reported to the sender and no server-side queue is kept yet.
+This milestone authenticates messages and encrypts the client-server transport;
+per-chat end-to-end message encryption is the next privacy stage.
+Keep the server database private and back it up: replacing it changes the
+server's identity.
 
 With the server running, enter a valid username in the Raylib client and press
-**Create my account**. The client connects to the configured address and sends a
-`HELLO` containing its public identity, a fresh nonce, and a fresh ephemeral
-X25519 public key. The client currently shows connection success after sending
-`HELLO`; it does not yet verify the server's response. Username registration
-begins after authentication is added.
+**Create my account**. The client sends a `HELLO` containing its public identity,
+a fresh nonce, and a fresh ephemeral X25519 public key. It verifies the signed
+server challenge, pins the server key on first connection, authenticates its own
+identity, and then opens the chat screen. Username registration and offline
+message storage are later stages.

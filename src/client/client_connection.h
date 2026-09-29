@@ -21,7 +21,9 @@ typedef enum ClientConnectionStatus
     CLIENT_CONNECTION_RECEIVE_FAILED,
     CLIENT_CONNECTION_SERVER_AUTH_FAILED,
     CLIENT_CONNECTION_SERVER_UNTRUSTED,
-    CLIENT_CONNECTION_CLIENT_AUTH_FAILED
+    CLIENT_CONNECTION_CLIENT_AUTH_FAILED,
+    CLIENT_CONNECTION_MESSAGE_REJECTED,
+    CLIENT_CONNECTION_NO_MESSAGE
 } ClientConnectionStatus;
 
 typedef struct ClientConnection
@@ -53,14 +55,25 @@ ClientConnectionStatus client_connection_finish_handshake(
     uint16_t port,
     const ClientIdentity *identity);
 
-/* Sends arbitrary UTF-8 text through the authenticated transport and returns
- * the server's protected echo.  This is the development message path; it is
- * deliberately unavailable before the handshake has completed. */
-ClientConnectionStatus client_connection_send_text(
+/* Sends a signed UTF-8 message to one authenticated contact. The server only
+ * accepts the send after the authenticated transport handshake has completed. */
+ClientConnectionStatus client_connection_send_private_text(
     ClientConnection *connection,
+    const ClientIdentity *identity,
+    const uint8_t recipient_id[PROTOCOL_IDENTITY_ID_SIZE],
     const char *text,
-    char *reply,
-    size_t reply_capacity);
+    uint64_t *delivery_id);
+
+/* Reads one delivered private message when the socket is ready. The function
+ * never waits for a new message; CLIENT_CONNECTION_NO_MESSAGE means there was
+ * nothing to read in this frame. */
+ClientConnectionStatus client_connection_poll_private_message(
+    ClientConnection *connection,
+    const ClientIdentity *identity,
+    uint8_t sender_id[PROTOCOL_IDENTITY_ID_SIZE],
+    char *text,
+    size_t text_capacity,
+    uint64_t *sender_timestamp_unix_ms);
 
 bool client_connection_is_open(const ClientConnection *connection);
 void client_connection_close(ClientConnection *connection);

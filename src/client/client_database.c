@@ -336,6 +336,56 @@ ClientDatabaseStatus client_database_contact_count(ClientDatabase *database, uin
     return CLIENT_DATABASE_OK;
 }
 
+ClientDatabaseStatus client_database_list_contacts(
+    ClientDatabase *database,
+    ClientContact *contacts,
+    uint32_t capacity,
+    uint32_t *count)
+{
+    sqlite3_stmt *statement = NULL;
+    uint32_t loaded = 0;
+    int result;
+
+    if (database == NULL || database->connection == NULL || contacts == NULL ||
+        capacity == 0 || count == NULL)
+    {
+        return CLIENT_DATABASE_INVALID_ARGUMENT;
+    }
+
+    if (sqlite3_prepare_v2(database->connection,
+            "SELECT public_key FROM contacts ORDER BY rowid LIMIT ?;", -1,
+            &statement, NULL) != SQLITE_OK ||
+        sqlite3_bind_int(statement, 1, (int)capacity) != SQLITE_OK)
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_READ_FAILED;
+    }
+
+    while ((result = sqlite3_step(statement)) == SQLITE_ROW)
+    {
+        const void *public_key = sqlite3_column_blob(statement, 0);
+
+        if (sqlite3_column_bytes(statement, 0) != crypto_sign_PUBLICKEYBYTES ||
+            public_key == NULL || loaded == capacity)
+        {
+            sqlite3_finalize(statement);
+            return CLIENT_DATABASE_READ_FAILED;
+        }
+        memcpy(contacts[loaded].public_key, public_key,
+               sizeof(contacts[loaded].public_key));
+        ++loaded;
+    }
+
+    sqlite3_finalize(statement);
+    if (result != SQLITE_DONE)
+    {
+        return CLIENT_DATABASE_READ_FAILED;
+    }
+
+    *count = loaded;
+    return CLIENT_DATABASE_OK;
+}
+
 ClientDatabaseStatus client_database_ensure_self_contact(
     ClientDatabase *database,
     const ClientIdentity *identity)
