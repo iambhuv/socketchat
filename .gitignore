@@ -11,3 +11,8 @@ socket_chat.exe
 socket_chat.db
 socket_chat.db-shm
 socket_chat.db-wal
+
+# Local server identity
+socket_chat_server.db
+socket_chat_server.db-shm
+socket_chat_server.db-wal

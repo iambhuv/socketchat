@@ -98,12 +98,18 @@ You can choose another port by passing it as the first argument:
 
 On Windows with a Debug build, use `build\Debug\socket_chat_server.exe`.
 
-The current server accepts up to 32 clients. It validates binary protocol frames,
-records each connection's claimed identity from `HELLO`, and replies to `PING`
-with `PONG`. Authentication, encryption, and queued-message storage are added in
-later stages.
+The server accepts up to 32 clients and validates binary protocol frames. On the
+first run it creates `socket_chat_server.db` to keep its Ed25519 signing key
+across restarts. For each `HELLO`, it generates a fresh nonce and X25519 keypair,
+then returns a signed `CHALLENGE`. It prints its public key at startup for future
+client pinning. The server does not yet accept `AUTHENTICATE` or ordinary chat
+requests; client verification, encrypted transport, and message storage are the
+next stages. Keep the server database private and back it up: replacing it
+changes the server's identity.
 
 With the server running, enter a valid username in the Raylib client and press
 **Create my account**. The client connects to the configured address and sends a
 `HELLO` containing its public identity, a fresh nonce, and a fresh ephemeral
-X25519 public key. Username registration begins after authentication is added.
+X25519 public key. The client currently shows connection success after sending
+`HELLO`; it does not yet verify the server's response. Username registration
+begins after authentication is added.

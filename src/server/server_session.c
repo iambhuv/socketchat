@@ -1,25 +1,25 @@
 #include "server/server_session.h"
 
+#include <sodium.h>
 #include <string.h>
 
 void server_session_init(ServerSession *session)
 {
     if (session != NULL)
     {
-        memset(session, 0, sizeof(*session));
+        sodium_memzero(session, sizeof(*session));
     }
 }
 
 ServerSessionResult server_session_handle_frame(
     ServerSession *session,
+    const ServerIdentity *identity,
     const ProtocolFrame *frame,
     uint8_t *response,
     size_t response_capacity,
     size_t *response_size)
 {
-    uint64_t token;
-
-    if (session == NULL || frame == NULL || response == NULL ||
+    if (session == NULL || identity == NULL || frame == NULL || response == NULL ||
         response_size == NULL)
     {
         return SERVER_SESSION_INVALID_PAYLOAD;
@@ -29,6 +29,12 @@ ServerSessionResult server_session_handle_frame(
 
     if (frame->type == PROTOCOL_FRAME_HELLO)
     {
+        uint8_t signature_data[256];
+        uint8_t challenge_payload[PROTOCOL_CHALLENGE_PAYLOAD_SIZE];
+        size_t signature_data_size;
+        size_t challenge_payload_size;
+        ProtocolStatus status;
+
         if (session->hello_received)
         {
             return SERVER_SESSION_UNEXPECTED_FRAME;
@@ -42,9 +48,53 @@ ServerSessionResult server_session_handle_frame(
             return SERVER_SESSION_INVALID_PAYLOAD;
         }
 
+        memcpy(session->challenge.server_identity_public_key,
+               identity->public_key,
+               sizeof(identity->public_key));
+        randombytes_buf(session->challenge.server_nonce,
+                        sizeof(session->challenge.server_nonce));
+
+        if (crypto_kx_keypair(
+                session->challenge.server_ephemeral_public_key,
+                session->server_ephemeral_secret_key) != 0 ||
+            protocol_build_server_auth_signature_data(
+                signature_data, sizeof(signature_data),
+                &session->hello, &session->challenge,
+                &signature_data_size) != PROTOCOL_STATUS_OK ||
+            crypto_sign_detached(
+                session->challenge.server_signature, NULL,
+                signature_data, (unsigned long long)signature_data_size,
+                identity->secret_key) != 0)
+        {
+            sodium_memzero(signature_data, sizeof(signature_data));
+            return SERVER_SESSION_INTERNAL_ERROR;
+        }
+
+        sodium_memzero(signature_data, sizeof(signature_data));
+        status = protocol_encode_challenge(
+            challenge_payload, sizeof(challenge_payload),
+            &session->challenge, &challenge_payload_size);
+        if (status != PROTOCOL_STATUS_OK)
+        {
+            return SERVER_SESSION_INTERNAL_ERROR;
+        }
+
+        status = protocol_encode_frame(
+            response, response_capacity, PROTOCOL_FRAME_CHALLENGE,
+            frame->request_id, challenge_payload,
+            (uint32_t)challenge_payload_size, response_size);
+        if (status == PROTOCOL_STATUS_BUFFER_TOO_SMALL)
+        {
+            return SERVER_SESSION_OUTPUT_TOO_SMALL;
+        }
+        if (status != PROTOCOL_STATUS_OK)
+        {
+            return SERVER_SESSION_INTERNAL_ERROR;
+        }
+
         session->hello_received = true;
         session->hello_request_id = frame->request_id;
-        return SERVER_SESSION_ACCEPTED;
+        return SERVER_SESSION_REPLY_READY;
     }
 
     if (!session->hello_received)
@@ -52,60 +102,8 @@ ServerSessionResult server_session_handle_frame(
         return SERVER_SESSION_UNEXPECTED_FRAME;
     }
 
-    if (frame->type != PROTOCOL_FRAME_PING &&
-        frame->type != PROTOCOL_FRAME_PONG)
-    {
-        return SERVER_SESSION_UNEXPECTED_FRAME;
-    }
-
-    if (protocol_decode_ping(
-            frame->payload,
-            frame->payload_length,
-            &token) != PROTOCOL_STATUS_OK)
-    {
-        return SERVER_SESSION_INVALID_PAYLOAD;
-    }
-
-    if (frame->type == PROTOCOL_FRAME_PONG)
-    {
-        return SERVER_SESSION_ACCEPTED;
-    }
-
-    {
-        uint8_t pong_payload[8];
-        size_t pong_payload_size;
-        ProtocolStatus encode_status;
-
-        if (protocol_encode_ping(
-                pong_payload,
-                sizeof(pong_payload),
-                token,
-                &pong_payload_size) != PROTOCOL_STATUS_OK)
-        {
-            return SERVER_SESSION_INVALID_PAYLOAD;
-        }
-
-        encode_status = protocol_encode_frame(
-            response,
-            response_capacity,
-            PROTOCOL_FRAME_PONG,
-            frame->request_id,
-            pong_payload,
-            (uint32_t)pong_payload_size,
-            response_size);
-
-        if (encode_status == PROTOCOL_STATUS_BUFFER_TOO_SMALL)
-        {
-            return SERVER_SESSION_OUTPUT_TOO_SMALL;
-        }
-
-        if (encode_status != PROTOCOL_STATUS_OK)
-        {
-            return SERVER_SESSION_INVALID_PAYLOAD;
-        }
-    }
-
-    return SERVER_SESSION_REPLY_READY;
+    /* AUTHENTICATE and encrypted transport are the next server slice. */
+    return SERVER_SESSION_UNEXPECTED_FRAME;
 }
 
 const char *server_session_result_string(ServerSessionResult result)
@@ -122,6 +120,8 @@ const char *server_session_result_string(ServerSessionResult result)
             return "unexpected frame";
         case SERVER_SESSION_OUTPUT_TOO_SMALL:
             return "response buffer too small";
+        case SERVER_SESSION_INTERNAL_ERROR:
+            return "internal server error";
         default:
             return "unknown server session result";
     }
