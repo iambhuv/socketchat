@@ -1,4 +1,5 @@
 #include "client/client_database.h"
+#include "protocol/protocol.h"
 
 #include <string.h>
 
@@ -13,7 +14,23 @@ static const char CLIENT_DATABASE_SCHEMA[] =
     "port INTEGER NOT NULL,"
     "public_key BLOB NOT NULL CHECK (length(public_key) = 32),"
     "PRIMARY KEY (host, port)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS contacts ("
+    "public_key BLOB PRIMARY KEY CHECK (length(public_key) = 32),"
+    "link TEXT NOT NULL UNIQUE"
+    ");"
+    "CREATE TABLE IF NOT EXISTS client_account ("
+    "singleton INTEGER PRIMARY KEY CHECK (singleton = 1),"
+    "username TEXT NOT NULL"
     ");";
+
+static int client_database_hex_value(char value)
+{
+    if (value >= '0' && value <= '9') return value - '0';
+    if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+    if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+    return -1;
+}
 
 static ClientDatabaseStatus client_database_load_identity(
     ClientDatabase *database,
@@ -252,6 +269,163 @@ ClientDatabaseStatus client_database_trust_server(
     return result == SQLITE_DONE ? CLIENT_DATABASE_OK : CLIENT_DATABASE_WRITE_FAILED;
 }
 
+ClientDatabaseStatus client_database_add_contact_link(
+    ClientDatabase *database,
+    const char *link)
+{
+    static const char prefix[] = "socketchat://contact/";
+    uint8_t public_key[crypto_sign_PUBLICKEYBYTES];
+    sqlite3_stmt *statement = NULL;
+    size_t index;
+    int result;
+
+    if (database == NULL || database->connection == NULL || link == NULL ||
+        strncmp(link, prefix, sizeof(prefix) - 1u) != 0 ||
+        strlen(link) != (sizeof(prefix) - 1u) + crypto_sign_PUBLICKEYBYTES * 2u)
+    {
+        return CLIENT_DATABASE_INVALID_CONTACT_LINK;
+    }
+
+    for (index = 0; index < crypto_sign_PUBLICKEYBYTES; ++index)
+    {
+        const int high = client_database_hex_value(link[sizeof(prefix) - 1u + index * 2u]);
+        const int low = client_database_hex_value(link[sizeof(prefix) + index * 2u]);
+        if (high < 0 || low < 0)
+        {
+            return CLIENT_DATABASE_INVALID_CONTACT_LINK;
+        }
+        public_key[index] = (uint8_t)((high << 4) | low);
+    }
+
+    if (sqlite3_prepare_v2(database->connection,
+            "INSERT OR IGNORE INTO contacts (public_key, link) VALUES (?, ?);",
+            -1, &statement, NULL) != SQLITE_OK ||
+        sqlite3_bind_blob(statement, 1, public_key, sizeof(public_key), SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 2, link, -1, SQLITE_TRANSIENT) != SQLITE_OK)
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_WRITE_FAILED;
+    }
+    result = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    return result == SQLITE_DONE ? CLIENT_DATABASE_OK : CLIENT_DATABASE_WRITE_FAILED;
+}
+
+ClientDatabaseStatus client_database_contact_count(ClientDatabase *database, uint32_t *count)
+{
+    sqlite3_stmt *statement = NULL;
+    int result;
+
+    if (database == NULL || database->connection == NULL || count == NULL)
+    {
+        return CLIENT_DATABASE_INVALID_ARGUMENT;
+    }
+    if (sqlite3_prepare_v2(database->connection, "SELECT count(*) FROM contacts;", -1,
+                           &statement, NULL) != SQLITE_OK)
+    {
+        return CLIENT_DATABASE_READ_FAILED;
+    }
+    result = sqlite3_step(statement);
+    if (result != SQLITE_ROW || sqlite3_column_int64(statement, 0) > UINT32_MAX)
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_READ_FAILED;
+    }
+    *count = (uint32_t)sqlite3_column_int64(statement, 0);
+    sqlite3_finalize(statement);
+    return CLIENT_DATABASE_OK;
+}
+
+ClientDatabaseStatus client_database_ensure_self_contact(
+    ClientDatabase *database,
+    const ClientIdentity *identity)
+{
+    static const char prefix[] = "socketchat://contact/";
+    static const char hex[] = "0123456789abcdef";
+    char link[(sizeof(prefix) - 1u) + crypto_sign_PUBLICKEYBYTES * 2u + 1u];
+    size_t index;
+
+    if (identity == NULL || !client_identity_is_valid(identity))
+    {
+        return CLIENT_DATABASE_INVALID_ARGUMENT;
+    }
+    memcpy(link, prefix, sizeof(prefix) - 1u);
+    for (index = 0; index < crypto_sign_PUBLICKEYBYTES; ++index)
+    {
+        link[sizeof(prefix) - 1u + index * 2u] = hex[identity->public_key[index] >> 4];
+        link[sizeof(prefix) + index * 2u] = hex[identity->public_key[index] & 0x0fu];
+    }
+    link[sizeof(link) - 1u] = '\0';
+    return client_database_add_contact_link(database, link);
+}
+
+ClientDatabaseStatus client_database_save_account_username(
+    ClientDatabase *database, const char *username)
+{
+    sqlite3_stmt *statement = NULL;
+    int result;
+
+    if (database == NULL || database->connection == NULL || username == NULL ||
+        !protocol_username_is_valid(username, strlen(username)))
+    {
+        return CLIENT_DATABASE_INVALID_ARGUMENT;
+    }
+    if (sqlite3_prepare_v2(database->connection,
+            "INSERT INTO client_account (singleton, username) VALUES (1, ?) "
+            "ON CONFLICT(singleton) DO UPDATE SET username = excluded.username;",
+            -1, &statement, NULL) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 1, username, -1, SQLITE_TRANSIENT) != SQLITE_OK)
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_WRITE_FAILED;
+    }
+    result = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    return result == SQLITE_DONE ? CLIENT_DATABASE_OK : CLIENT_DATABASE_WRITE_FAILED;
+}
+
+ClientDatabaseStatus client_database_load_account_username(
+    ClientDatabase *database, char *username, size_t username_capacity, bool *was_found)
+{
+    sqlite3_stmt *statement = NULL;
+    const unsigned char *stored_username;
+    int result;
+    size_t stored_length;
+
+    if (database == NULL || database->connection == NULL || username == NULL ||
+        username_capacity == 0 || was_found == NULL)
+    {
+        return CLIENT_DATABASE_INVALID_ARGUMENT;
+    }
+    *was_found = false;
+    username[0] = '\0';
+    if (sqlite3_prepare_v2(database->connection,
+            "SELECT username FROM client_account WHERE singleton = 1;", -1,
+            &statement, NULL) != SQLITE_OK)
+    {
+        return CLIENT_DATABASE_READ_FAILED;
+    }
+    result = sqlite3_step(statement);
+    if (result == SQLITE_DONE)
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_OK;
+    }
+    stored_username = sqlite3_column_text(statement, 0);
+    stored_length = (size_t)sqlite3_column_bytes(statement, 0);
+    if (result != SQLITE_ROW || stored_username == NULL || stored_length + 1u > username_capacity ||
+        !protocol_username_is_valid((const char *)stored_username, stored_length))
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_READ_FAILED;
+    }
+    memcpy(username, stored_username, stored_length);
+    username[stored_length] = '\0';
+    *was_found = true;
+    sqlite3_finalize(statement);
+    return CLIENT_DATABASE_OK;
+}
+
 const char *client_database_status_string(ClientDatabaseStatus status)
 {
     switch (status)
@@ -274,6 +448,8 @@ const char *client_database_status_string(ClientDatabaseStatus status)
             return "could not generate identity keys";
         case CLIENT_DATABASE_SERVER_IDENTITY_MISMATCH:
             return "server identity changed";
+        case CLIENT_DATABASE_INVALID_CONTACT_LINK:
+            return "contact link is invalid";
         default:
             return "unknown database status";
     }

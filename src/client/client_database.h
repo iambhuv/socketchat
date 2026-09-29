@@ -17,7 +17,8 @@ typedef enum ClientDatabaseStatus
     CLIENT_DATABASE_WRITE_FAILED,
     CLIENT_DATABASE_CORRUPT_IDENTITY,
     CLIENT_DATABASE_KEY_GENERATION_FAILED,
-    CLIENT_DATABASE_SERVER_IDENTITY_MISMATCH
+    CLIENT_DATABASE_SERVER_IDENTITY_MISMATCH,
+    CLIENT_DATABASE_INVALID_CONTACT_LINK
 } ClientDatabaseStatus;
 
 typedef struct ClientDatabase
@@ -41,6 +42,30 @@ ClientDatabaseStatus client_database_trust_server(
     const char *host,
     uint16_t port,
     const unsigned char public_key[crypto_sign_PUBLICKEYBYTES]);
+
+/* Saves a socketchat://contact/<64 lowercase-or-uppercase hex characters>
+ * link.  Re-adding the same identity is harmless. */
+ClientDatabaseStatus client_database_add_contact_link(
+    ClientDatabase *database,
+    const char *link);
+
+ClientDatabaseStatus client_database_contact_count(
+    ClientDatabase *database,
+    uint32_t *count);
+
+/* Adds the owner's identity as the built-in Saved messages contact. */
+ClientDatabaseStatus client_database_ensure_self_contact(
+    ClientDatabase *database,
+    const ClientIdentity *identity);
+
+ClientDatabaseStatus client_database_save_account_username(
+    ClientDatabase *database,
+    const char *username);
+ClientDatabaseStatus client_database_load_account_username(
+    ClientDatabase *database,
+    char *username,
+    size_t username_capacity,
+    bool *was_found);
 
 const char *client_database_status_string(ClientDatabaseStatus status);
 

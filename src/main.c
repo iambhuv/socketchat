@@ -19,6 +19,8 @@ int main(void)
     ClientConnection connection;
     ClientIdentity identity;
     bool identity_was_created;
+    bool account_was_found = false;
+    bool reconnect_pending;
     bool chat_open = false;
     OnboardingScreen onboarding_screen;
 
@@ -46,6 +48,20 @@ int main(void)
             &database,
             &identity,
             &identity_was_created);
+    }
+    if (database_status == CLIENT_DATABASE_OK)
+    {
+        database_status = client_database_ensure_self_contact(&database, &identity);
+    }
+    if (database_status == CLIENT_DATABASE_OK)
+    {
+        char saved_username[ONBOARDING_USERNAME_CAPACITY];
+        database_status = client_database_load_account_username(
+            &database, saved_username, sizeof(saved_username), &account_was_found);
+        if (database_status == CLIENT_DATABASE_OK && account_was_found)
+        {
+            /* Applied after the Raylib UI state is initialized below. */
+        }
     }
 
     if (database_status != CLIENT_DATABASE_OK)
@@ -79,6 +95,19 @@ int main(void)
     SetTargetFPS(60);
     ui_font_load();
     onboarding_screen_init(&onboarding_screen);
+    reconnect_pending = account_was_found;
+    if (account_was_found)
+    {
+        char saved_username[ONBOARDING_USERNAME_CAPACITY];
+        bool found_again = false;
+        if (client_database_load_account_username(&database, saved_username,
+                                                  sizeof(saved_username), &found_again) == CLIENT_DATABASE_OK &&
+            found_again)
+        {
+            onboarding_screen_set_username(&onboarding_screen, saved_username);
+            onboarding_screen_set_status(&onboarding_screen, UI_STATUS_CONNECTING, "Reconnecting");
+        }
+    }
 
     while (!WindowShouldClose())
     {
@@ -88,10 +117,15 @@ int main(void)
 
         BeginDrawing();
         account_requested = !chat_open && onboarding_screen_draw(&onboarding_screen);
+        if (!chat_open && reconnect_pending)
+        {
+            account_requested = true;
+            reconnect_pending = false;
+        }
 
         if (chat_open)
         {
-            chat_screen_draw(&connection);
+            chat_screen_draw(&connection, &database);
         }
         EndDrawing();
 
@@ -124,6 +158,8 @@ int main(void)
                     &onboarding_screen,
                     UI_STATUS_CONNECTED,
                     "Connected");
+                (void)client_database_save_account_username(
+                    &database, onboarding_screen_username(&onboarding_screen));
                 chat_open = true;
                 printf("Connected with a verified server and authenticated identity.\n");
             }
