@@ -7,6 +7,12 @@ static const char CLIENT_DATABASE_SCHEMA[] =
     "singleton INTEGER PRIMARY KEY CHECK (singleton = 1),"
     "public_key BLOB NOT NULL CHECK (length(public_key) = 32),"
     "secret_key BLOB NOT NULL CHECK (length(secret_key) = 64)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS trusted_server ("
+    "host TEXT NOT NULL,"
+    "port INTEGER NOT NULL,"
+    "public_key BLOB NOT NULL CHECK (length(public_key) = 32),"
+    "PRIMARY KEY (host, port)"
     ");";
 
 static ClientDatabaseStatus client_database_load_identity(
@@ -187,6 +193,65 @@ ClientDatabaseStatus client_database_load_or_create_identity(
     return CLIENT_DATABASE_OK;
 }
 
+ClientDatabaseStatus client_database_trust_server(
+    ClientDatabase *database,
+    const char *host,
+    uint16_t port,
+    const unsigned char public_key[crypto_sign_PUBLICKEYBYTES])
+{
+    sqlite3_stmt *statement = NULL;
+    int result;
+
+    if (database == NULL || database->connection == NULL || host == NULL ||
+        host[0] == '\0' || port == 0 || public_key == NULL)
+    {
+        return CLIENT_DATABASE_INVALID_ARGUMENT;
+    }
+
+    if (sqlite3_prepare_v2(database->connection,
+            "SELECT public_key FROM trusted_server WHERE host = ? AND port = ?;",
+            -1, &statement, NULL) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 1, host, -1, SQLITE_STATIC) != SQLITE_OK ||
+        sqlite3_bind_int(statement, 2, (int)port) != SQLITE_OK)
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_READ_FAILED;
+    }
+
+    result = sqlite3_step(statement);
+    if (result == SQLITE_ROW)
+    {
+        const void *stored_key = sqlite3_column_blob(statement, 0);
+        const int stored_size = sqlite3_column_bytes(statement, 0);
+        const bool matches = stored_size == crypto_sign_PUBLICKEYBYTES &&
+            sodium_memcmp(stored_key, public_key, crypto_sign_PUBLICKEYBYTES) == 0;
+
+        sqlite3_finalize(statement);
+        return matches ? CLIENT_DATABASE_OK : CLIENT_DATABASE_SERVER_IDENTITY_MISMATCH;
+    }
+    sqlite3_finalize(statement);
+    if (result != SQLITE_DONE)
+    {
+        return CLIENT_DATABASE_READ_FAILED;
+    }
+
+    if (sqlite3_prepare_v2(database->connection,
+            "INSERT INTO trusted_server (host, port, public_key) VALUES (?, ?, ?);",
+            -1, &statement, NULL) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 1, host, -1, SQLITE_STATIC) != SQLITE_OK ||
+        sqlite3_bind_int(statement, 2, (int)port) != SQLITE_OK ||
+        sqlite3_bind_blob(statement, 3, public_key, crypto_sign_PUBLICKEYBYTES,
+                          SQLITE_STATIC) != SQLITE_OK)
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_WRITE_FAILED;
+    }
+
+    result = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    return result == SQLITE_DONE ? CLIENT_DATABASE_OK : CLIENT_DATABASE_WRITE_FAILED;
+}
+
 const char *client_database_status_string(ClientDatabaseStatus status)
 {
     switch (status)
@@ -207,6 +272,8 @@ const char *client_database_status_string(ClientDatabaseStatus status)
             return "stored identity is invalid";
         case CLIENT_DATABASE_KEY_GENERATION_FAILED:
             return "could not generate identity keys";
+        case CLIENT_DATABASE_SERVER_IDENTITY_MISMATCH:
+            return "server identity changed";
         default:
             return "unknown database status";
     }

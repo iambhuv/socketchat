@@ -7,6 +7,7 @@
 #include "server/server_identity.h"
 #include "server/server_session.h"
 
+#include <sodium.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -18,7 +19,7 @@
 #define SERVER_LISTEN_BACKLOG 16
 #define SERVER_WAIT_MILLISECONDS 250
 #define SERVER_CLIENT_BUFFER_SIZE \
-    (PROTOCOL_FRAME_HEADER_SIZE + PROTOCOL_MAX_SERVER_PAYLOAD)
+    (PROTOCOL_TRANSPORT_HEADER_SIZE + PROTOCOL_MAX_TRANSPORT_CIPHERTEXT)
 
 typedef struct ServerClient
 {
@@ -137,6 +138,59 @@ static bool server_send_error(
     return net_send_all(socket, frame_bytes, frame_size) == NET_STATUS_OK;
 }
 
+static bool server_send_response(ServerClient *client, const uint8_t *frame, size_t frame_size)
+{
+    uint8_t nonce[PROTOCOL_NONCE_SIZE];
+    uint8_t aad[64];
+    uint8_t *record;
+    uint32_t ciphertext_length;
+    size_t prefix_size;
+    size_t aad_size;
+    unsigned long long ciphertext_size;
+
+    if (!client->session.authenticated)
+    {
+        return net_send_all(client->socket, frame, frame_size) == NET_STATUS_OK;
+    }
+    if (client->session.send_sequence == UINT64_MAX ||
+        frame_size > UINT32_MAX - PROTOCOL_AEAD_TAG_SIZE)
+    {
+        return false;
+    }
+    ciphertext_length = (uint32_t)frame_size + PROTOCOL_AEAD_TAG_SIZE;
+    if (protocol_transport_record_size(ciphertext_length) == 0)
+    {
+        return false;
+    }
+    record = malloc(protocol_transport_record_size(ciphertext_length));
+    if (record == NULL ||
+        protocol_encode_transport_record_prefix(record,
+                                                protocol_transport_record_size(ciphertext_length),
+                                                client->session.send_sequence, ciphertext_length,
+                                                &prefix_size) != PROTOCOL_STATUS_OK ||
+        protocol_build_transport_nonce(nonce, client->session.send_sequence) != PROTOCOL_STATUS_OK ||
+        protocol_build_transport_authenticated_data(aad, sizeof(aad),
+                                                    client->session.send_sequence, ciphertext_length,
+                                                    &aad_size) != PROTOCOL_STATUS_OK ||
+        crypto_aead_xchacha20poly1305_ietf_encrypt(
+            record + prefix_size, &ciphertext_size, frame, (unsigned long long)frame_size,
+            aad, (unsigned long long)aad_size, NULL, nonce, client->session.send_key) != 0 ||
+        ciphertext_size != ciphertext_length)
+    {
+        free(record);
+        return false;
+    }
+    if (net_send_all(client->socket, record,
+                     protocol_transport_record_size(ciphertext_length)) != NET_STATUS_OK)
+    {
+        free(record);
+        return false;
+    }
+    free(record);
+    ++client->session.send_sequence;
+    return true;
+}
+
 static void server_print_claimed_identity(
     size_t client_index,
     const uint8_t identity[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE])
@@ -171,7 +225,7 @@ static bool server_handle_frame(
 
     if (result == SERVER_SESSION_REPLY_READY)
     {
-        if (net_send_all(client->socket, response, response_size) != NET_STATUS_OK)
+        if (!server_send_response(client, response, response_size))
         {
             return false;
         }
@@ -239,12 +293,56 @@ static void server_read_from_client(
     while (client->buffered_size > 0)
     {
         ProtocolFrame frame;
-        size_t consumed_size;
-        ProtocolStatus protocol_status = protocol_decode_frame(
-            client->read_buffer,
-            client->buffered_size,
-            &frame,
-            &consumed_size);
+        size_t consumed_size = 0;
+        ProtocolStatus protocol_status;
+        uint8_t plaintext[PROTOCOL_FRAME_HEADER_SIZE + PROTOCOL_MAX_SERVER_PAYLOAD];
+
+        if (!client->session.authenticated)
+        {
+            protocol_status = protocol_decode_frame(
+                client->read_buffer,
+                client->buffered_size,
+                &frame,
+                &consumed_size);
+        }
+        else
+        {
+            ProtocolTransportRecord record;
+            uint8_t nonce[PROTOCOL_NONCE_SIZE];
+            uint8_t aad[64];
+            size_t record_size;
+            size_t aad_size;
+            size_t frame_consumed;
+            unsigned long long plaintext_size;
+
+            protocol_status = protocol_decode_transport_record(
+                client->read_buffer, client->buffered_size, &record, &record_size);
+            if (protocol_status == PROTOCOL_STATUS_OK)
+            {
+                if (record.sequence != client->session.receive_sequence ||
+                    client->session.receive_sequence == UINT64_MAX ||
+                    protocol_build_transport_nonce(nonce, record.sequence) != PROTOCOL_STATUS_OK ||
+                    protocol_build_transport_authenticated_data(aad, sizeof(aad), record.sequence,
+                                                                record.ciphertext_length,
+                                                                &aad_size) != PROTOCOL_STATUS_OK ||
+                    crypto_aead_xchacha20poly1305_ietf_decrypt(
+                        plaintext, &plaintext_size, NULL, record.ciphertext,
+                        record.ciphertext_length, aad, (unsigned long long)aad_size,
+                        nonce, client->session.receive_key) != 0 ||
+                    plaintext_size > sizeof(plaintext) ||
+                    protocol_decode_frame(plaintext, (size_t)plaintext_size, &frame,
+                                          &frame_consumed) != PROTOCOL_STATUS_OK ||
+                    frame_consumed != (size_t)plaintext_size)
+                {
+                    protocol_status = PROTOCOL_STATUS_INVALID_VALUE;
+                }
+                else
+                {
+                    consumed_size = record_size;
+                    ++client->session.receive_sequence;
+                }
+            }
+        }
 
         if (protocol_status == PROTOCOL_STATUS_NEED_MORE_DATA)
         {
@@ -253,11 +351,14 @@ static void server_read_from_client(
 
         if (protocol_status != PROTOCOL_STATUS_OK)
         {
-            server_send_error(
-                client->socket,
-                0,
-                PROTOCOL_ERROR_MALFORMED_FRAME,
-                protocol_status_string(protocol_status));
+            if (!client->session.authenticated)
+            {
+                server_send_error(
+                    client->socket,
+                    0,
+                    PROTOCOL_ERROR_MALFORMED_FRAME,
+                    protocol_status_string(protocol_status));
+            }
             server_disconnect_client(
                 clients,
                 client_index,

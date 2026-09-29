@@ -18,6 +18,11 @@ typedef struct ServerSession
     ProtocolHello hello;
     ProtocolChallenge challenge;
     uint8_t server_ephemeral_secret_key[crypto_kx_SECRETKEYBYTES];
+    uint8_t receive_key[crypto_kx_SESSIONKEYBYTES];
+    uint8_t send_key[crypto_kx_SESSIONKEYBYTES];
+    uint64_t receive_sequence;
+    uint64_t send_sequence;
+    bool authenticated;
 } ServerSession;
 
 typedef enum ServerSessionResult

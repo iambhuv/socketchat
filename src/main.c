@@ -91,13 +91,13 @@ int main(void)
 
         if (chat_open)
         {
-            chat_screen_draw();
+            chat_screen_draw(&connection);
         }
         EndDrawing();
 
         if (account_requested)
         {
-            const ClientConnectionStatus connection_status =
+            ClientConnectionStatus connection_status =
                 client_connection_connect(
                     &connection,
                     APP_SERVER_HOST,
@@ -108,10 +108,24 @@ int main(void)
             {
                 onboarding_screen_set_status(
                     &onboarding_screen,
+                    UI_STATUS_CONNECTING,
+                    "Verifying server");
+                connection_status = client_connection_finish_handshake(
+                    &connection,
+                    &database,
+                    APP_SERVER_HOST,
+                    APP_SERVER_PORT,
+                    &identity);
+            }
+
+            if (connection_status == CLIENT_CONNECTION_OK)
+            {
+                onboarding_screen_set_status(
+                    &onboarding_screen,
                     UI_STATUS_CONNECTED,
                     "Connected");
                 chat_open = true;
-                printf("Connected to the server and sent HELLO.\n");
+                printf("Connected with a verified server and authenticated identity.\n");
             }
             else
             {
