@@ -20,7 +20,6 @@ int main(void)
     ClientIdentity identity;
     bool identity_was_created;
     bool chat_open = false;
-    ChatScreen chat_screen;
     OnboardingScreen onboarding_screen;
 
     if (!dependencies_initialize())
@@ -80,7 +79,6 @@ int main(void)
     SetTargetFPS(60);
     ui_font_load();
     onboarding_screen_init(&onboarding_screen);
-    chat_screen_init(&chat_screen);
 
     while (!WindowShouldClose())
     {
@@ -93,7 +91,7 @@ int main(void)
 
         if (chat_open)
         {
-            chat_screen_draw(&chat_screen);
+            chat_screen_draw();
         }
         EndDrawing();
 
