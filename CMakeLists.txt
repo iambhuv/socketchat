@@ -85,10 +85,11 @@ socket_chat_enable_warnings(chat_net)
 
 add_library(chat_server STATIC
     src/server/server.c
+    src/server/server_identity.c
     src/server/server_session.c
 )
 target_include_directories(chat_server PUBLIC src)
-target_link_libraries(chat_server PUBLIC chat_net chat_protocol)
+target_link_libraries(chat_server PUBLIC chat_dependencies chat_net chat_protocol)
 socket_chat_enable_warnings(chat_server)
 
 add_library(chat_ui STATIC

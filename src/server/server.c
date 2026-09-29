@@ -1,7 +1,10 @@
 #include "server/server.h"
 
+#include "core/app_config.h"
+#include "core/dependencies.h"
 #include "net/net.h"
 #include "protocol/protocol.h"
+#include "server/server_identity.h"
 #include "server/server_session.h"
 
 #include <signal.h>
@@ -153,12 +156,14 @@ static void server_print_claimed_identity(
 static bool server_handle_frame(
     ServerClient *client,
     size_t client_index,
+    const ServerIdentity *identity,
     const ProtocolFrame *frame)
 {
     uint8_t response[SERVER_SESSION_MAX_RESPONSE_SIZE];
     size_t response_size;
     ServerSessionResult result = server_session_handle_frame(
         &client->session,
+        identity,
         frame,
         response,
         sizeof(response),
@@ -171,7 +176,13 @@ static bool server_handle_frame(
             return false;
         }
 
-        printf("Client %zu PING answered with PONG.\n", client_index + 1);
+        if (frame->type == PROTOCOL_FRAME_HELLO)
+        {
+            server_print_claimed_identity(
+                client_index,
+                client->session.hello.identity_public_key);
+            printf("Client %zu sent a signed CHALLENGE.\n", client_index + 1);
+        }
         return true;
     }
 
@@ -185,23 +196,13 @@ static bool server_handle_frame(
         return false;
     }
 
-    if (frame->type == PROTOCOL_FRAME_HELLO)
-    {
-        server_print_claimed_identity(
-            client_index,
-            client->session.hello.identity_public_key);
-    }
-    else if (frame->type == PROTOCOL_FRAME_PONG)
-    {
-        printf("Client %zu sent PONG.\n", client_index + 1);
-    }
-
     return true;
 }
 
 static void server_read_from_client(
     ServerClient clients[SERVER_MAX_CLIENTS],
-    size_t client_index)
+    size_t client_index,
+    const ServerIdentity *identity)
 {
     ServerClient *client = &clients[client_index];
     size_t received_size;
@@ -264,7 +265,7 @@ static void server_read_from_client(
             return;
         }
 
-        if (!server_handle_frame(client, client_index, &frame))
+        if (!server_handle_frame(client, client_index, identity, &frame))
         {
             server_disconnect_client(clients, client_index, "invalid request");
             return;
@@ -326,15 +327,30 @@ static size_t server_build_socket_list(
 int server_run(uint16_t port)
 {
     ServerClient clients[SERVER_MAX_CLIENTS];
+    ServerIdentity identity;
     NetSocket listening_socket = net_socket_invalid();
     int exit_code = 0;
 
     server_stop_requested = 0;
     server_initialize_clients(clients);
 
+    if (!dependencies_initialize())
+    {
+        fprintf(stderr, "Could not initialize libsodium and SQLite.\n");
+        return 1;
+    }
+
+    if (!server_identity_load_or_create(APP_SERVER_DATABASE_PATH, &identity))
+    {
+        dependencies_shutdown();
+        return 1;
+    }
+
     if (net_init() != NET_STATUS_OK)
     {
         fprintf(stderr, "Could not initialize networking.\n");
+        server_identity_clear(&identity);
+        dependencies_shutdown();
         return 1;
     }
 
@@ -352,6 +368,8 @@ int server_run(uint16_t port)
                 (unsigned int)port,
                 net_status_string(listen_status));
             net_shutdown();
+            server_identity_clear(&identity);
+            dependencies_shutdown();
             return 1;
         }
     }
@@ -360,6 +378,15 @@ int server_run(uint16_t port)
     signal(SIGTERM, server_handle_stop_signal);
 
     printf("Server listening on 0.0.0.0:%u\n", (unsigned int)port);
+    printf("Server identity (pin this key on clients later): ");
+    {
+        size_t key_index;
+        for (key_index = 0; key_index < sizeof(identity.public_key); ++key_index)
+        {
+            printf("%02x", (unsigned int)identity.public_key[key_index]);
+        }
+        printf("\n");
+    }
     printf("Press Ctrl+C to stop.\n");
 
     while (!server_stop_requested)
@@ -403,7 +430,8 @@ int server_run(uint16_t port)
             {
                 server_read_from_client(
                     clients,
-                    client_indexes[socket_index]);
+                    client_indexes[socket_index],
+                    &identity);
             }
         }
     }
@@ -419,6 +447,8 @@ int server_run(uint16_t port)
 
     net_close(&listening_socket);
     net_shutdown();
+    server_identity_clear(&identity);
+    dependencies_shutdown();
     printf("Server stopped.\n");
     return exit_code;
 }
