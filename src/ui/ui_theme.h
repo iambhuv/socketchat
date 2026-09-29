@@ -3,6 +3,8 @@
 
 #include <raylib.h>
 
+#include <stdbool.h>
+
 typedef struct UiTheme
 {
     Color background;
@@ -29,5 +31,7 @@ typedef struct UiTheme
 } UiTheme;
 
 const UiTheme *ui_theme_default(void);
+void ui_theme_set_dark_mode(bool enabled);
+bool ui_theme_is_dark_mode(void);
 
 #endif
