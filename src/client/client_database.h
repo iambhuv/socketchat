@@ -2,6 +2,7 @@
 #define SOCKET_CHAT_CLIENT_DATABASE_H
 
 #include "client/client_identity.h"
+#include "protocol/protocol.h"
 
 #include <sqlite3.h>
 
@@ -32,6 +33,21 @@ typedef struct ClientContact
 {
     uint8_t public_key[crypto_sign_PUBLICKEYBYTES];
 } ClientContact;
+
+#define CLIENT_DATABASE_MESSAGE_TEXT_CAPACITY 512u
+
+typedef enum ClientMessageDirection
+{
+    CLIENT_MESSAGE_INCOMING = 1,
+    CLIENT_MESSAGE_OUTGOING = 2
+} ClientMessageDirection;
+
+typedef struct ClientChatMessage
+{
+    ClientMessageDirection direction;
+    uint64_t sender_timestamp_unix_ms;
+    char text[CLIENT_DATABASE_MESSAGE_TEXT_CAPACITY];
+} ClientChatMessage;
 
 ClientDatabaseStatus client_database_open(
     ClientDatabase *database,
@@ -64,6 +80,26 @@ ClientDatabaseStatus client_database_contact_count(
 ClientDatabaseStatus client_database_list_contacts(
     ClientDatabase *database,
     ClientContact *contacts,
+    uint32_t capacity,
+    uint32_t *count);
+
+/* Stores one verified message. The packet ID makes retry delivery idempotent.
+ * A successful duplicate write sets was_inserted to false. */
+ClientDatabaseStatus client_database_store_message(
+    ClientDatabase *database,
+    const uint8_t contact_public_key[crypto_sign_PUBLICKEYBYTES],
+    const uint8_t packet_id[PROTOCOL_PACKET_ID_SIZE],
+    ClientMessageDirection direction,
+    uint64_t sender_timestamp_unix_ms,
+    const uint8_t *text,
+    uint32_t text_length,
+    bool *was_inserted);
+
+/* Loads the newest messages for one chat in chronological order. */
+ClientDatabaseStatus client_database_load_messages(
+    ClientDatabase *database,
+    const uint8_t contact_public_key[crypto_sign_PUBLICKEYBYTES],
+    ClientChatMessage *messages,
     uint32_t capacity,
     uint32_t *count);
 

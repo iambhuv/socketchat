@@ -1,6 +1,7 @@
 #include "client/client_database.h"
 #include "protocol/protocol.h"
 
+#include <stdint.h>
 #include <string.h>
 
 static const char CLIENT_DATABASE_SCHEMA[] =
@@ -22,7 +23,17 @@ static const char CLIENT_DATABASE_SCHEMA[] =
     "CREATE TABLE IF NOT EXISTS client_account ("
     "singleton INTEGER PRIMARY KEY CHECK (singleton = 1),"
     "username TEXT NOT NULL"
-    ");";
+    ");"
+    "CREATE TABLE IF NOT EXISTS messages ("
+    "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    "contact_public_key BLOB NOT NULL CHECK (length(contact_public_key) = 32),"
+    "packet_id BLOB NOT NULL UNIQUE CHECK (length(packet_id) = 16),"
+    "direction INTEGER NOT NULL CHECK (direction IN (1, 2)),"
+    "sender_timestamp_unix_ms INTEGER NOT NULL,"
+    "text TEXT NOT NULL"
+    ");"
+    "CREATE INDEX IF NOT EXISTS messages_by_contact "
+    "ON messages (contact_public_key, id);";
 
 static int client_database_hex_value(char value)
 {
@@ -373,6 +384,126 @@ ClientDatabaseStatus client_database_list_contacts(
         }
         memcpy(contacts[loaded].public_key, public_key,
                sizeof(contacts[loaded].public_key));
+        ++loaded;
+    }
+
+    sqlite3_finalize(statement);
+    if (result != SQLITE_DONE)
+    {
+        return CLIENT_DATABASE_READ_FAILED;
+    }
+
+    *count = loaded;
+    return CLIENT_DATABASE_OK;
+}
+
+ClientDatabaseStatus client_database_store_message(
+    ClientDatabase *database,
+    const uint8_t contact_public_key[crypto_sign_PUBLICKEYBYTES],
+    const uint8_t packet_id[PROTOCOL_PACKET_ID_SIZE],
+    ClientMessageDirection direction,
+    uint64_t sender_timestamp_unix_ms,
+    const uint8_t *text,
+    uint32_t text_length,
+    bool *was_inserted)
+{
+    sqlite3_stmt *statement = NULL;
+    int result;
+
+    if (database == NULL || database->connection == NULL || contact_public_key == NULL ||
+        packet_id == NULL || text == NULL || was_inserted == NULL ||
+        (direction != CLIENT_MESSAGE_INCOMING && direction != CLIENT_MESSAGE_OUTGOING) ||
+        text_length == 0 || text_length > PROTOCOL_MAX_TEXT_SIZE ||
+        sender_timestamp_unix_ms > INT64_MAX)
+    {
+        return CLIENT_DATABASE_INVALID_ARGUMENT;
+    }
+
+    if (sqlite3_prepare_v2(database->connection,
+            "INSERT OR IGNORE INTO messages "
+            "(contact_public_key, packet_id, direction, sender_timestamp_unix_ms, text) "
+            "VALUES (?, ?, ?, ?, ?);", -1, &statement, NULL) != SQLITE_OK ||
+        sqlite3_bind_blob(statement, 1, contact_public_key,
+                          crypto_sign_PUBLICKEYBYTES, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_blob(statement, 2, packet_id, PROTOCOL_PACKET_ID_SIZE,
+                          SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_int(statement, 3, (int)direction) != SQLITE_OK ||
+        sqlite3_bind_int64(statement, 4, (sqlite3_int64)sender_timestamp_unix_ms) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 5, (const char *)text, (int)text_length,
+                          SQLITE_TRANSIENT) != SQLITE_OK)
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_WRITE_FAILED;
+    }
+
+    result = sqlite3_step(statement);
+    if (result != SQLITE_DONE)
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_WRITE_FAILED;
+    }
+    *was_inserted = sqlite3_changes(database->connection) == 1;
+    sqlite3_finalize(statement);
+    return CLIENT_DATABASE_OK;
+}
+
+ClientDatabaseStatus client_database_load_messages(
+    ClientDatabase *database,
+    const uint8_t contact_public_key[crypto_sign_PUBLICKEYBYTES],
+    ClientChatMessage *messages,
+    uint32_t capacity,
+    uint32_t *count)
+{
+    sqlite3_stmt *statement = NULL;
+    uint32_t loaded = 0;
+    int result;
+
+    if (database == NULL || database->connection == NULL || contact_public_key == NULL ||
+        messages == NULL || capacity == 0 || count == NULL)
+    {
+        return CLIENT_DATABASE_INVALID_ARGUMENT;
+    }
+
+    if (sqlite3_prepare_v2(database->connection,
+            "SELECT direction, sender_timestamp_unix_ms, text FROM ("
+            "SELECT id, direction, sender_timestamp_unix_ms, text FROM messages "
+            "WHERE contact_public_key = ? ORDER BY id DESC LIMIT ?"
+            ") ORDER BY id ASC;", -1, &statement, NULL) != SQLITE_OK ||
+        sqlite3_bind_blob(statement, 1, contact_public_key,
+                          crypto_sign_PUBLICKEYBYTES, SQLITE_TRANSIENT) != SQLITE_OK ||
+        sqlite3_bind_int(statement, 2, (int)capacity) != SQLITE_OK)
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_READ_FAILED;
+    }
+
+    while ((result = sqlite3_step(statement)) == SQLITE_ROW)
+    {
+        const int direction = sqlite3_column_int(statement, 0);
+        const sqlite3_int64 timestamp = sqlite3_column_int64(statement, 1);
+        const unsigned char *stored_text = sqlite3_column_text(statement, 2);
+        const int stored_length = sqlite3_column_bytes(statement, 2);
+
+        if (loaded == capacity ||
+            (direction != CLIENT_MESSAGE_INCOMING && direction != CLIENT_MESSAGE_OUTGOING) ||
+            timestamp < 0 || stored_text == NULL || stored_length <= 0)
+        {
+            sqlite3_finalize(statement);
+            return CLIENT_DATABASE_READ_FAILED;
+        }
+
+        messages[loaded].direction = (ClientMessageDirection)direction;
+        messages[loaded].sender_timestamp_unix_ms = (uint64_t)timestamp;
+        if ((size_t)stored_length >= sizeof(messages[loaded].text))
+        {
+            memcpy(messages[loaded].text, "[Message is too long to preview]",
+                   sizeof("[Message is too long to preview]"));
+        }
+        else
+        {
+            memcpy(messages[loaded].text, stored_text, (size_t)stored_length);
+            messages[loaded].text[stored_length] = '\0';
+        }
         ++loaded;
     }
 

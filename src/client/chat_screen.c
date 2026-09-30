@@ -10,6 +10,7 @@
 #include <string.h>
 
 #define CHAT_MAX_CONTACTS 24u
+#define CHAT_MAX_VISIBLE_MESSAGES 7u
 #define CHAT_CONTACT_LINK_CAPACITY \
     (sizeof("socketchat://contact/") - 1u + PROTOCOL_IDENTITY_ID_SIZE * 2u + 1u)
 
@@ -142,7 +143,7 @@ void chat_screen_draw(
     const ClientIdentity *identity)
 {
     static char draft[512] = "";
-    static char echo[512] = "";
+    static char pending_text[512] = "";
     static char delivery_status[96] = "";
     static char contact_link[256] = "";
     static bool adding_contact = false;
@@ -151,9 +152,15 @@ void chat_screen_draw(
     static char contact_status[96] = "";
     static uint8_t selected_contact[PROTOCOL_IDENTITY_ID_SIZE] = { 0 };
     static char selected_title[40] = "Saved messages";
-    static bool last_message_was_incoming = false;
+    static uint8_t pending_contact[PROTOCOL_IDENTITY_ID_SIZE] = { 0 };
+    static uint8_t pending_packet_id[PROTOCOL_PACKET_ID_SIZE] = { 0 };
+    static uint32_t pending_request_id = 0;
+    static uint64_t pending_timestamp_unix_ms = 0;
+    static bool send_pending = false;
     ClientContact contacts[CHAT_MAX_CONTACTS];
+    ClientChatMessage messages[CHAT_MAX_VISIBLE_MESSAGES];
     uint32_t contact_count = 0;
+    uint32_t message_count = 0;
     uint32_t contact_index;
     const float width = (float)GetScreenWidth();
     const float height = (float)GetScreenHeight();
@@ -183,34 +190,46 @@ void chat_screen_draw(
     }
     if (connection != NULL && identity != NULL && connection->authenticated)
     {
-        char received_text[sizeof(echo)];
-        uint8_t sender[PROTOCOL_IDENTITY_ID_SIZE];
-        uint64_t received_at;
         const ClientConnectionStatus receive_status =
-            client_connection_poll_private_message(
-                connection, identity, sender, received_text, sizeof(received_text),
-                &received_at);
+            client_connection_pump(connection, database, identity);
 
-        (void)received_at;
-        if (receive_status == CLIENT_CONNECTION_OK)
-        {
-            if (saved_messages_selected && keys_match(sender, selected_contact))
-            {
-                memcpy(echo, received_text, sizeof(echo));
-                last_message_was_incoming = true;
-                memcpy(delivery_status, "Message received and acknowledged",
-                       sizeof("Message received and acknowledged"));
-            }
-            else
-            {
-                memcpy(delivery_status, "New private message received",
-                       sizeof("New private message received"));
-            }
-        }
-        else if (receive_status != CLIENT_CONNECTION_NO_MESSAGE)
+        if (receive_status != CLIENT_CONNECTION_OK &&
+            receive_status != CLIENT_CONNECTION_NO_MESSAGE)
         {
             snprintf(delivery_status, sizeof(delivery_status), "Connection: %s",
                      client_connection_status_string(receive_status));
+        }
+        if (send_pending)
+        {
+            uint64_t delivery_id;
+            const ClientConnectionStatus send_status = client_connection_take_send_result(
+                connection, pending_request_id, pending_packet_id, &delivery_id);
+
+            if (send_status == CLIENT_CONNECTION_OK)
+            {
+                bool was_inserted;
+                const ClientDatabaseStatus database_status = client_database_store_message(
+                    database, pending_contact, pending_packet_id, CLIENT_MESSAGE_OUTGOING,
+                    pending_timestamp_unix_ms, (const uint8_t *)pending_text,
+                    (uint32_t)strlen(pending_text), &was_inserted);
+                (void)delivery_id;
+                if (database_status == CLIENT_DATABASE_OK)
+                {
+                    memcpy(delivery_status, "Message delivered", sizeof("Message delivered"));
+                }
+                else
+                {
+                    memcpy(delivery_status, "Message delivered but could not be saved",
+                           sizeof("Message delivered but could not be saved"));
+                }
+                send_pending = false;
+            }
+            else if (send_status != CLIENT_CONNECTION_NO_MESSAGE)
+            {
+                snprintf(delivery_status, sizeof(delivery_status), "Message: %s",
+                         client_connection_status_string(send_status));
+                send_pending = false;
+            }
         }
     }
     {
@@ -225,7 +244,6 @@ void chat_screen_draw(
                 memcpy(selected_title, "Saved messages", sizeof("Saved messages"));
             }
             saved_messages_selected = true;
-            echo[0] = '\0';
         }
         DrawRectangleRounded(saved_messages, roundness(saved_messages, 12.0f), 10,
                              saved_messages_selected ? Fade(theme->primary, 0.18f)
@@ -267,8 +285,6 @@ void chat_screen_draw(
             memcpy(selected_title, label, sizeof(selected_title));
             saved_messages_selected = true;
             composer_focused = false;
-            echo[0] = '\0';
-            last_message_was_incoming = false;
         }
     }
 
@@ -330,8 +346,6 @@ void chat_screen_draw(
                 memcpy(selected_title, "Saved messages", sizeof("Saved messages"));
             }
             saved_messages_selected = true;
-            echo[0] = '\0';
-            last_message_was_incoming = false;
         }
         if (button(copy_link, "Copy my link", theme) && identity != NULL)
         {
@@ -355,21 +369,35 @@ void chat_screen_draw(
                   theme->text_muted, false);
     }
 
-    if (saved_messages_selected && echo[0] != '\0')
+    if (saved_messages_selected && database != NULL && identity != NULL)
     {
-        const float message_width = MeasureTextEx(body_font, echo, 16.0f, 1.0f).x;
-        const float bubble_width = message_width + 42.0f;
-        const float bubble_x = last_message_was_incoming ? sidebar_width + 30.0f
-                                                          : width - 72.0f - message_width;
-        draw_text(last_message_was_incoming ? selected_title : "You",
-                  (Vector2){ bubble_x + 10.0f, height - 168.0f },
-                  13.0f, theme->text_muted, true);
-        DrawRectangleRounded((Rectangle){ bubble_x, height - 146.0f,
-                                          bubble_width, 42.0f }, 0.28f, 10,
-                             last_message_was_incoming ? Fade(theme->surface, 0.90f)
-                                                      : Fade(theme->primary, 0.18f));
-        draw_text(echo, (Vector2){ bubble_x + 20.0f,
-                                   height - 133.0f }, 16.0f, theme->text, false);
+        if (client_database_load_messages(database, selected_contact, messages,
+                                          CHAT_MAX_VISIBLE_MESSAGES,
+                                          &message_count) != CLIENT_DATABASE_OK)
+        {
+            message_count = 0;
+        }
+        for (contact_index = 0; contact_index < message_count; ++contact_index)
+        {
+            const ClientChatMessage *message = &messages[contact_index];
+            const bool incoming = message->direction == CLIENT_MESSAGE_INCOMING;
+            const float message_width = MeasureTextEx(body_font, message->text, 16.0f, 1.0f).x;
+            const float bubble_width = fminf(message_width + 42.0f,
+                                              width - sidebar_width - 80.0f);
+            const float bubble_x = incoming ? sidebar_width + 30.0f
+                                            : width - 30.0f - bubble_width;
+            const float bubble_y = 104.0f + (float)contact_index * 58.0f;
+
+            draw_text(incoming ? selected_title : "You",
+                      (Vector2){ bubble_x + 10.0f, bubble_y }, 13.0f,
+                      theme->text_muted, true);
+            DrawRectangleRounded((Rectangle){ bubble_x, bubble_y + 18.0f,
+                                              bubble_width, 42.0f }, 0.28f, 10,
+                                 incoming ? Fade(theme->surface, 0.90f)
+                                          : Fade(theme->primary, 0.18f));
+            draw_text(message->text, (Vector2){ bubble_x + 20.0f, bubble_y + 31.0f },
+                      16.0f, theme->text, false);
+        }
     }
 
     if (saved_messages_selected)
@@ -377,6 +405,7 @@ void chat_screen_draw(
         const Rectangle composer = { sidebar_width + 28.0f, height - 82.0f,
                                      width - sidebar_width - 186.0f, 52.0f };
         const Rectangle send = { width - 142.0f, height - 82.0f, 114.0f, 52.0f };
+        const bool send_pressed = button(send, send_pending ? "Sending" : "Send", theme);
         DrawRectangleRounded(composer, roundness(composer, 13.0f), 12, Fade(theme->surface, 0.76f));
         DrawRectangleRoundedLinesEx(composer, roundness(composer, 13.0f), 12, 1.0f,
                                     Fade(theme->border, 0.85f));
@@ -398,22 +427,28 @@ void chat_screen_draw(
                 MeasureTextEx(body_font, caret_text, 16.0f, 1.0f).x;
             DrawRectangle((int)caret_x, (int)composer.y + 14, 2, 23, theme->primary);
         }
-        if ((button(send, "Send", theme) || (IsKeyPressed(KEY_ENTER) && draft[0] != '\0')) &&
+        if (!send_pending &&
+            (send_pressed || (IsKeyPressed(KEY_ENTER) && draft[0] != '\0')) &&
             draft[0] != '\0')
         {
-            uint64_t delivery_id;
+            uint32_t request_id;
+            uint8_t packet_id[PROTOCOL_PACKET_ID_SIZE];
+            uint64_t sender_timestamp_unix_ms;
             if (connection != NULL && identity != NULL &&
                 client_connection_send_private_text(connection, identity,
                                                     selected_contact, draft,
-                                                    &delivery_id) == CLIENT_CONNECTION_OK)
+                                                    &request_id, packet_id,
+                                                    &sender_timestamp_unix_ms) == CLIENT_CONNECTION_OK)
             {
-                (void)delivery_id;
-                memcpy(echo, draft, sizeof(echo));
+                memcpy(pending_text, draft, sizeof(pending_text));
+                memcpy(pending_contact, selected_contact, sizeof(pending_contact));
+                memcpy(pending_packet_id, packet_id, sizeof(pending_packet_id));
+                pending_request_id = request_id;
+                pending_timestamp_unix_ms = sender_timestamp_unix_ms;
+                send_pending = true;
                 draft[0] = '\0';
                 composer_focused = false;
-                last_message_was_incoming = false;
-                memcpy(delivery_status, "Message accepted by the server",
-                       sizeof("Message accepted by the server"));
+                memcpy(delivery_status, "Sending message...", sizeof("Sending message..."));
             }
             else
             {

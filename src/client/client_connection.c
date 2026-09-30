@@ -162,11 +162,20 @@ static ClientConnectionStatus client_connection_receive_encrypted_frame(
 
 static void client_connection_clear_handshake(ClientConnection *connection)
 {
+    free(connection->receive_buffer);
+    connection->receive_buffer = NULL;
+    connection->receive_buffer_size = 0;
+    connection->receive_buffer_capacity = 0;
     sodium_memzero(&connection->hello, sizeof(connection->hello));
     sodium_memzero(connection->ephemeral_secret_key, sizeof(connection->ephemeral_secret_key));
     sodium_memzero(connection->receive_key, sizeof(connection->receive_key));
     sodium_memzero(connection->send_key, sizeof(connection->send_key));
+    sodium_memzero(connection->pending_responses,
+                   sizeof(connection->pending_responses));
+    sodium_memzero(connection->pending_acknowledgement_request_ids,
+                   sizeof(connection->pending_acknowledgement_request_ids));
     connection->hello_request_id = 0;
+    connection->next_request_id = 0;
     connection->authenticated = false;
 }
 
@@ -248,6 +257,15 @@ ClientConnectionStatus client_connection_connect(
         client_connection_close(connection);
         return CLIENT_CONNECTION_SEND_FAILED;
     }
+
+    connection->receive_buffer = malloc(CLIENT_CONNECTION_RECEIVE_BUFFER_CAPACITY);
+    if (connection->receive_buffer == NULL)
+    {
+        client_connection_close(connection);
+        return CLIENT_CONNECTION_PROTOCOL_FAILED;
+    }
+    connection->receive_buffer_capacity = CLIENT_CONNECTION_RECEIVE_BUFFER_CAPACITY;
+    connection->next_request_id = CLIENT_SEND_REQUEST_ID;
 
     return CLIENT_CONNECTION_OK;
 }
@@ -361,43 +379,46 @@ ClientConnectionStatus client_connection_finish_handshake(
     return CLIENT_CONNECTION_OK;
 }
 
-static ClientConnectionStatus client_connection_receive_application_frame(
-    ClientConnection *connection,
-    uint8_t **frame_bytes,
-    size_t *frame_size,
-    ProtocolFrame *frame)
+static uint32_t client_connection_next_request_id(ClientConnection *connection)
 {
-    size_t consumed;
-    ClientConnectionStatus status;
+    const uint32_t request_id = connection->next_request_id == 0
+        ? CLIENT_SEND_REQUEST_ID : connection->next_request_id;
 
-    if (connection == NULL || frame_bytes == NULL || frame_size == NULL ||
-        frame == NULL)
+    connection->next_request_id = request_id == UINT32_MAX
+        ? CLIENT_SEND_REQUEST_ID : request_id + 1u;
+    return request_id;
+}
+
+static bool client_connection_track_acknowledgement(
+    ClientConnection *connection, uint32_t request_id)
+{
+    size_t index;
+
+    for (index = 0; index < CLIENT_CONNECTION_MAX_PENDING_ACKNOWLEDGEMENTS; ++index)
     {
-        return CLIENT_CONNECTION_INVALID_ARGUMENT;
+        if (connection->pending_acknowledgement_request_ids[index] == 0)
+        {
+            connection->pending_acknowledgement_request_ids[index] = request_id;
+            return true;
+        }
     }
+    return false;
+}
 
-    *frame_bytes = malloc(PROTOCOL_FRAME_HEADER_SIZE + PROTOCOL_MAX_SERVER_PAYLOAD);
-    if (*frame_bytes == NULL)
+static bool client_connection_consume_acknowledgement(
+    ClientConnection *connection, uint32_t request_id)
+{
+    size_t index;
+
+    for (index = 0; index < CLIENT_CONNECTION_MAX_PENDING_ACKNOWLEDGEMENTS; ++index)
     {
-        return CLIENT_CONNECTION_PROTOCOL_FAILED;
+        if (connection->pending_acknowledgement_request_ids[index] == request_id)
+        {
+            connection->pending_acknowledgement_request_ids[index] = 0;
+            return true;
+        }
     }
-
-    status = client_connection_receive_encrypted_frame(
-        connection,
-        *frame_bytes,
-        PROTOCOL_FRAME_HEADER_SIZE + PROTOCOL_MAX_SERVER_PAYLOAD,
-        frame_size);
-    if (status != CLIENT_CONNECTION_OK ||
-        protocol_decode_frame(*frame_bytes, *frame_size, frame, &consumed) !=
-            PROTOCOL_STATUS_OK ||
-        consumed != *frame_size)
-    {
-        free(*frame_bytes);
-        *frame_bytes = NULL;
-        return status == CLIENT_CONNECTION_OK ? CLIENT_CONNECTION_PROTOCOL_FAILED : status;
-    }
-
-    return CLIENT_CONNECTION_OK;
+    return false;
 }
 
 static ClientConnectionStatus client_connection_acknowledge_delivery(
@@ -409,26 +430,22 @@ static ClientConnectionStatus client_connection_acknowledge_delivery(
     uint8_t acknowledgement_frame[PROTOCOL_FRAME_HEADER_SIZE +
                                   sizeof(acknowledgement_payload)];
     ProtocolAcknowledge acknowledgement;
-    ProtocolDeliveryReference reference;
-    ProtocolFrame response;
-    uint8_t *response_bytes = NULL;
     size_t acknowledgement_payload_size;
     size_t acknowledgement_frame_size;
-    size_t response_size;
-    ClientConnectionStatus status;
+    const uint32_t request_id = client_connection_next_request_id(connection);
 
     acknowledgement.delivery_id = deliver->delivery_id;
     memcpy(acknowledgement.packet_id, deliver->packet_id,
            sizeof(acknowledgement.packet_id));
     acknowledgement.result = result;
 
-    if (protocol_encode_acknowledge(acknowledgement_payload,
+    if (!client_connection_track_acknowledgement(connection, request_id) ||
+        protocol_encode_acknowledge(acknowledgement_payload,
                                     sizeof(acknowledgement_payload),
                                     &acknowledgement,
                                     &acknowledgement_payload_size) != PROTOCOL_STATUS_OK ||
         protocol_encode_frame(acknowledgement_frame, sizeof(acknowledgement_frame),
-                              PROTOCOL_FRAME_ACKNOWLEDGE,
-                              CLIENT_ACKNOWLEDGE_REQUEST_ID,
+                              PROTOCOL_FRAME_ACKNOWLEDGE, request_id,
                               acknowledgement_payload,
                               (uint32_t)acknowledgement_payload_size,
                               &acknowledgement_frame_size) != PROTOCOL_STATUS_OK)
@@ -436,30 +453,265 @@ static ClientConnectionStatus client_connection_acknowledge_delivery(
         return CLIENT_CONNECTION_PROTOCOL_FAILED;
     }
 
-    status = client_connection_send_encrypted_frame(
+    return client_connection_send_encrypted_frame(
         connection, acknowledgement_frame, acknowledgement_frame_size);
-    if (status != CLIENT_CONNECTION_OK)
+}
+
+static ClientConnectionStatus client_connection_decrypt_record(
+    ClientConnection *connection,
+    const ProtocolTransportRecord *transport_record,
+    uint8_t *plaintext,
+    size_t plaintext_capacity,
+    size_t *plaintext_size)
+{
+    uint8_t nonce[PROTOCOL_NONCE_SIZE];
+    uint8_t aad[64];
+    size_t aad_size;
+    unsigned long long decrypted_size;
+
+    if (connection == NULL || transport_record == NULL || plaintext == NULL ||
+        plaintext_size == NULL || connection->receive_sequence == UINT64_MAX ||
+        transport_record->sequence != connection->receive_sequence ||
+        transport_record->ciphertext_length < PROTOCOL_AEAD_TAG_SIZE ||
+        transport_record->ciphertext_length - PROTOCOL_AEAD_TAG_SIZE > plaintext_capacity ||
+        protocol_build_transport_nonce(nonce, transport_record->sequence) != PROTOCOL_STATUS_OK ||
+        protocol_build_transport_authenticated_data(aad, sizeof(aad),
+                                                    transport_record->sequence,
+                                                    transport_record->ciphertext_length,
+                                                    &aad_size) != PROTOCOL_STATUS_OK ||
+        crypto_aead_xchacha20poly1305_ietf_decrypt(
+            plaintext, &decrypted_size, NULL, transport_record->ciphertext,
+            transport_record->ciphertext_length, aad, (unsigned long long)aad_size,
+            nonce, connection->receive_key) != 0)
     {
-        return status;
+        return CLIENT_CONNECTION_SERVER_AUTH_FAILED;
     }
 
-    status = client_connection_receive_application_frame(
-        connection, &response_bytes, &response_size, &response);
-    if (status != CLIENT_CONNECTION_OK ||
-        response.type != PROTOCOL_FRAME_ACKNOWLEDGED ||
-        response.request_id != CLIENT_ACKNOWLEDGE_REQUEST_ID ||
-        protocol_decode_delivery_reference(response.payload, response.payload_length,
-                                           &reference) != PROTOCOL_STATUS_OK ||
-        reference.delivery_id != deliver->delivery_id ||
-        memcmp(reference.packet_id, deliver->packet_id,
-               sizeof(reference.packet_id)) != 0)
-    {
-        free(response_bytes);
-        return status == CLIENT_CONNECTION_OK ? CLIENT_CONNECTION_PROTOCOL_FAILED : status;
-    }
-
-    free(response_bytes);
+    ++connection->receive_sequence;
+    *plaintext_size = (size_t)decrypted_size;
     return CLIENT_CONNECTION_OK;
+}
+
+static ClientConnectionStatus client_connection_store_response(
+    ClientConnection *connection, const ProtocolFrame *frame)
+{
+    size_t index;
+
+    if (frame->payload_length > CLIENT_CONNECTION_MAX_RESPONSE_PAYLOAD)
+    {
+        return CLIENT_CONNECTION_PROTOCOL_FAILED;
+    }
+
+    for (index = 0; index < CLIENT_CONNECTION_MAX_PENDING_RESPONSES; ++index)
+    {
+        ClientConnectionPendingResponse *response =
+            &connection->pending_responses[index];
+        if (!response->in_use)
+        {
+            response->in_use = true;
+            response->type = frame->type;
+            response->request_id = frame->request_id;
+            response->payload_length = frame->payload_length;
+            memcpy(response->payload, frame->payload, frame->payload_length);
+            return CLIENT_CONNECTION_OK;
+        }
+    }
+    return CLIENT_CONNECTION_PROTOCOL_FAILED;
+}
+
+static ClientConnectionStatus client_connection_handle_delivery(
+    ClientConnection *connection,
+    ClientDatabase *database,
+    const ClientIdentity *identity,
+    const ProtocolFrame *frame)
+{
+    ProtocolDeliver deliver;
+    ProtocolPacket packet;
+    ProtocolContent content;
+    ProtocolText decoded_text;
+    ClientDatabaseStatus database_status;
+    bool was_inserted;
+
+    if (protocol_decode_deliver(frame->payload, frame->payload_length, &deliver) !=
+            PROTOCOL_STATUS_OK ||
+        protocol_decode_packet(deliver.packet, deliver.packet_length, &packet) !=
+            PROTOCOL_STATUS_OK ||
+        protocol_validate_delivered_packet(&deliver, &packet, identity->public_key) !=
+            PROTOCOL_STATUS_OK ||
+        packet.kind != PROTOCOL_PACKET_TEXT_MESSAGE ||
+        crypto_sign_verify_detached(packet.signature, packet.signed_bytes,
+                                    (unsigned long long)packet.signed_length,
+                                    packet.sender_public_key) != 0 ||
+        protocol_decode_content(packet.payload, packet.payload_length, &content) !=
+            PROTOCOL_STATUS_OK ||
+        content.type != PROTOCOL_CONTENT_TEXT ||
+        protocol_decode_text_data(content.data, content.data_length, &decoded_text) !=
+            PROTOCOL_STATUS_OK)
+    {
+        return CLIENT_CONNECTION_PROTOCOL_FAILED;
+    }
+
+    database_status = client_database_store_message(
+        database, deliver.sender_id, deliver.packet_id,
+        sodium_memcmp(deliver.sender_id, identity->public_key,
+                       PROTOCOL_IDENTITY_ID_SIZE) == 0
+            ? CLIENT_MESSAGE_OUTGOING : CLIENT_MESSAGE_INCOMING,
+        decoded_text.sender_timestamp_unix_ms, decoded_text.text,
+        decoded_text.text_length, &was_inserted);
+    if (database_status != CLIENT_DATABASE_OK)
+    {
+        (void)client_connection_acknowledge_delivery(
+            connection, &deliver, PROTOCOL_ACK_REJECTED);
+        return CLIENT_CONNECTION_STORAGE_FAILED;
+    }
+
+    return client_connection_acknowledge_delivery(
+        connection, &deliver,
+        was_inserted ? PROTOCOL_ACK_STORED : PROTOCOL_ACK_DUPLICATE);
+}
+
+static ClientConnectionStatus client_connection_dispatch_frame(
+    ClientConnection *connection,
+    ClientDatabase *database,
+    const ClientIdentity *identity,
+    const ProtocolFrame *frame)
+{
+    ProtocolDeliveryReference reference;
+
+    if (frame->type == PROTOCOL_FRAME_DELIVER)
+    {
+        return client_connection_handle_delivery(connection, database, identity, frame);
+    }
+    if (frame->type == PROTOCOL_FRAME_ACKNOWLEDGED)
+    {
+        if (!client_connection_consume_acknowledgement(connection, frame->request_id) ||
+            protocol_decode_delivery_reference(frame->payload, frame->payload_length,
+                                               &reference) != PROTOCOL_STATUS_OK)
+        {
+            return CLIENT_CONNECTION_PROTOCOL_FAILED;
+        }
+        return CLIENT_CONNECTION_OK;
+    }
+    if (frame->type == PROTOCOL_FRAME_ERROR &&
+        client_connection_consume_acknowledgement(connection, frame->request_id))
+    {
+        return CLIENT_CONNECTION_MESSAGE_REJECTED;
+    }
+    if (frame->type == PROTOCOL_FRAME_SEND_ACCEPTED ||
+        frame->type == PROTOCOL_FRAME_ERROR)
+    {
+        return client_connection_store_response(connection, frame);
+    }
+    return CLIENT_CONNECTION_PROTOCOL_FAILED;
+}
+
+ClientConnectionStatus client_connection_pump(
+    ClientConnection *connection,
+    ClientDatabase *database,
+    const ClientIdentity *identity)
+{
+    bool processed_frame = false;
+    size_t reads;
+
+    if (connection == NULL || database == NULL || identity == NULL ||
+        !connection->authenticated || connection->receive_buffer == NULL ||
+        connection->receive_buffer_capacity == 0 ||
+        !client_identity_is_valid(identity))
+    {
+        return CLIENT_CONNECTION_INVALID_ARGUMENT;
+    }
+
+    for (reads = 0; reads < 8u; ++reads)
+    {
+        bool readable;
+        size_t received;
+
+        if (net_wait_readable(&connection->socket, 1, 0, &readable) != NET_STATUS_OK)
+        {
+            return CLIENT_CONNECTION_RECEIVE_FAILED;
+        }
+        if (!readable)
+        {
+            break;
+        }
+        if (connection->receive_buffer_size == connection->receive_buffer_capacity ||
+            net_receive_some(connection->socket,
+                             connection->receive_buffer + connection->receive_buffer_size,
+                             connection->receive_buffer_capacity - connection->receive_buffer_size,
+                             &received) != NET_STATUS_OK || received == 0)
+        {
+            client_connection_close(connection);
+            return CLIENT_CONNECTION_RECEIVE_FAILED;
+        }
+        connection->receive_buffer_size += received;
+
+        for (;;)
+        {
+            ProtocolTransportRecord transport_record;
+            ProtocolFrame frame;
+            ProtocolStatus protocol_status;
+            uint8_t *plaintext;
+            size_t record_size;
+            size_t plaintext_size;
+            size_t frame_size;
+            ClientConnectionStatus status;
+
+            protocol_status = protocol_decode_transport_record(
+                connection->receive_buffer, connection->receive_buffer_size,
+                &transport_record, &record_size);
+            if (protocol_status == PROTOCOL_STATUS_NEED_MORE_DATA)
+            {
+                break;
+            }
+            if (protocol_status != PROTOCOL_STATUS_OK ||
+                transport_record.ciphertext_length < PROTOCOL_AEAD_TAG_SIZE)
+            {
+                client_connection_close(connection);
+                return CLIENT_CONNECTION_PROTOCOL_FAILED;
+            }
+
+            plaintext = malloc(transport_record.ciphertext_length - PROTOCOL_AEAD_TAG_SIZE);
+            if (plaintext == NULL)
+            {
+                return CLIENT_CONNECTION_PROTOCOL_FAILED;
+            }
+            status = client_connection_decrypt_record(
+                connection, &transport_record, plaintext,
+                transport_record.ciphertext_length - PROTOCOL_AEAD_TAG_SIZE,
+                &plaintext_size);
+            if (status == CLIENT_CONNECTION_OK &&
+                (protocol_decode_frame(plaintext, plaintext_size, &frame, &frame_size) !=
+                    PROTOCOL_STATUS_OK || frame_size != plaintext_size))
+            {
+                status = CLIENT_CONNECTION_PROTOCOL_FAILED;
+            }
+            if (status == CLIENT_CONNECTION_OK)
+            {
+                status = client_connection_dispatch_frame(connection, database, identity,
+                                                          &frame);
+            }
+            sodium_memzero(plaintext,
+                           transport_record.ciphertext_length - PROTOCOL_AEAD_TAG_SIZE);
+            free(plaintext);
+
+            memmove(connection->receive_buffer,
+                    connection->receive_buffer + record_size,
+                    connection->receive_buffer_size - record_size);
+            connection->receive_buffer_size -= record_size;
+            processed_frame = true;
+            if (status != CLIENT_CONNECTION_OK)
+            {
+                if (status == CLIENT_CONNECTION_PROTOCOL_FAILED ||
+                    status == CLIENT_CONNECTION_SERVER_AUTH_FAILED)
+                {
+                    client_connection_close(connection);
+                }
+                return status;
+            }
+        }
+    }
+
+    return processed_frame ? CLIENT_CONNECTION_OK : CLIENT_CONNECTION_NO_MESSAGE;
 }
 
 ClientConnectionStatus client_connection_send_private_text(
@@ -467,13 +719,12 @@ ClientConnectionStatus client_connection_send_private_text(
     const ClientIdentity *identity,
     const uint8_t recipient_id[PROTOCOL_IDENTITY_ID_SIZE],
     const char *text,
-    uint64_t *delivery_id)
+    uint32_t *request_id,
+    uint8_t packet_id[PROTOCOL_PACKET_ID_SIZE],
+    uint64_t *sender_timestamp_unix_ms)
 {
     ProtocolText text_message;
     ProtocolSend send;
-    ProtocolDeliveryReference accepted;
-    ProtocolFrame response;
-    uint8_t packet_id[PROTOCOL_PACKET_ID_SIZE];
     uint8_t chat_id[PROTOCOL_CHAT_ID_SIZE];
     uint8_t signature[PROTOCOL_SIGNATURE_SIZE];
     uint8_t *text_data = NULL;
@@ -481,7 +732,6 @@ ClientConnectionStatus client_connection_send_private_text(
     uint8_t *packet = NULL;
     uint8_t *send_payload = NULL;
     uint8_t *frame_bytes = NULL;
-    uint8_t *response_bytes = NULL;
     size_t text_size;
     size_t text_data_size;
     size_t content_size;
@@ -489,12 +739,12 @@ ClientConnectionStatus client_connection_send_private_text(
     size_t packet_size;
     size_t send_payload_size;
     size_t frame_size;
-    size_t response_size;
     ClientConnectionStatus status = CLIENT_CONNECTION_PROTOCOL_FAILED;
+    uint32_t generated_request_id;
 
-    if (connection == NULL || identity == NULL || recipient_id == NULL ||
-        text == NULL || !connection->authenticated ||
-        !client_identity_is_valid(identity))
+    if (connection == NULL || identity == NULL || recipient_id == NULL || text == NULL ||
+        request_id == NULL || packet_id == NULL || sender_timestamp_unix_ms == NULL ||
+        !connection->authenticated || !client_identity_is_valid(identity))
     {
         return CLIENT_CONNECTION_INVALID_ARGUMENT;
     }
@@ -521,8 +771,8 @@ ClientConnectionStatus client_connection_send_private_text(
     packet = malloc(packet_size);
     send_payload = malloc(send_payload_size);
     frame_bytes = malloc(PROTOCOL_FRAME_HEADER_SIZE + send_payload_size);
-    if (text_data == NULL || content == NULL || packet == NULL ||
-        send_payload == NULL || frame_bytes == NULL)
+    if (text_data == NULL || content == NULL || packet == NULL || send_payload == NULL ||
+        frame_bytes == NULL)
     {
         goto cleanup;
     }
@@ -530,24 +780,22 @@ ClientConnectionStatus client_connection_send_private_text(
     text_message.sender_timestamp_unix_ms = client_current_unix_ms();
     text_message.text = (const uint8_t *)text;
     text_message.text_length = (uint32_t)text_size;
-    randombytes_buf(packet_id, sizeof(packet_id));
+    randombytes_buf(packet_id, PROTOCOL_PACKET_ID_SIZE);
     if (protocol_encode_text_data(text_data, text_data_size, &text_message,
                                   &text_data_size) != PROTOCOL_STATUS_OK ||
         protocol_encode_content(content, content_size, PROTOCOL_CONTENT_TEXT,
                                 text_data, (uint32_t)text_data_size,
                                 &content_size) != PROTOCOL_STATUS_OK ||
         protocol_encode_unsigned_packet(packet, packet_size,
-                                        PROTOCOL_PACKET_TEXT_MESSAGE,
-                                        packet_id, identity->public_key,
-                                        recipient_id, chat_id, content,
-                                        (uint32_t)content_size,
+                                        PROTOCOL_PACKET_TEXT_MESSAGE, packet_id,
+                                        identity->public_key, recipient_id, chat_id,
+                                        content, (uint32_t)content_size,
                                         &packet_unsigned_size) != PROTOCOL_STATUS_OK ||
         crypto_sign_detached(signature, NULL, packet,
                              (unsigned long long)packet_unsigned_size,
                              identity->secret_key) != 0 ||
-        protocol_append_packet_signature(packet, packet_size,
-                                         packet_unsigned_size, signature,
-                                         &packet_size) != PROTOCOL_STATUS_OK)
+        protocol_append_packet_signature(packet, packet_size, packet_unsigned_size,
+                                         signature, &packet_size) != PROTOCOL_STATUS_OK)
     {
         goto cleanup;
     }
@@ -557,148 +805,79 @@ ClientConnectionStatus client_connection_send_private_text(
     send.expires_in_seconds = 0;
     send.packet = packet;
     send.packet_length = (uint32_t)packet_size;
+    generated_request_id = client_connection_next_request_id(connection);
     if (protocol_encode_send(send_payload, send_payload_size, &send,
                              &send_payload_size) != PROTOCOL_STATUS_OK ||
-        protocol_encode_frame(frame_bytes,
-                              PROTOCOL_FRAME_HEADER_SIZE + send_payload_size,
-                              PROTOCOL_FRAME_SEND, CLIENT_SEND_REQUEST_ID,
-                              send_payload, (uint32_t)send_payload_size,
-                              &frame_size) != PROTOCOL_STATUS_OK)
+        protocol_encode_frame(frame_bytes, PROTOCOL_FRAME_HEADER_SIZE + send_payload_size,
+                              PROTOCOL_FRAME_SEND, generated_request_id, send_payload,
+                              (uint32_t)send_payload_size, &frame_size) != PROTOCOL_STATUS_OK)
     {
         goto cleanup;
     }
 
     status = client_connection_send_encrypted_frame(connection, frame_bytes, frame_size);
-    if (status != CLIENT_CONNECTION_OK)
+    if (status == CLIENT_CONNECTION_OK)
     {
-        goto cleanup;
+        *request_id = generated_request_id;
+        *sender_timestamp_unix_ms = text_message.sender_timestamp_unix_ms;
     }
-
-    status = client_connection_receive_application_frame(
-        connection, &response_bytes, &response_size, &response);
-    if (status != CLIENT_CONNECTION_OK)
-    {
-        goto cleanup;
-    }
-    if (response.type == PROTOCOL_FRAME_ERROR)
-    {
-        status = CLIENT_CONNECTION_MESSAGE_REJECTED;
-        goto cleanup;
-    }
-    if (response.type != PROTOCOL_FRAME_SEND_ACCEPTED ||
-        response.request_id != CLIENT_SEND_REQUEST_ID ||
-        protocol_decode_delivery_reference(response.payload, response.payload_length,
-                                           &accepted) != PROTOCOL_STATUS_OK ||
-        memcmp(accepted.packet_id, packet_id, sizeof(accepted.packet_id)) != 0)
-    {
-        status = CLIENT_CONNECTION_PROTOCOL_FAILED;
-        goto cleanup;
-    }
-
-    if (delivery_id != NULL)
-    {
-        *delivery_id = accepted.delivery_id;
-    }
-    status = CLIENT_CONNECTION_OK;
 
 cleanup:
     sodium_memzero(signature, sizeof(signature));
-    sodium_memzero(packet_id, sizeof(packet_id));
     sodium_memzero(chat_id, sizeof(chat_id));
     free(text_data);
     free(content);
     free(packet);
     free(send_payload);
     free(frame_bytes);
-    free(response_bytes);
     return status;
 }
 
-ClientConnectionStatus client_connection_poll_private_message(
+ClientConnectionStatus client_connection_take_send_result(
     ClientConnection *connection,
-    const ClientIdentity *identity,
-    uint8_t sender_id[PROTOCOL_IDENTITY_ID_SIZE],
-    char *text,
-    size_t text_capacity,
-    uint64_t *sender_timestamp_unix_ms)
+    uint32_t request_id,
+    const uint8_t expected_packet_id[PROTOCOL_PACKET_ID_SIZE],
+    uint64_t *delivery_id)
 {
-    bool readable;
-    uint8_t *frame_bytes = NULL;
-    size_t frame_size;
-    ProtocolFrame frame;
-    ProtocolDeliver deliver;
-    ProtocolPacket packet;
-    ProtocolContent content;
-    ProtocolText decoded_text;
-    ClientConnectionStatus status;
+    size_t index;
 
-    if (connection == NULL || identity == NULL || sender_id == NULL || text == NULL ||
-        text_capacity == 0 || sender_timestamp_unix_ms == NULL ||
-        !connection->authenticated || !client_identity_is_valid(identity))
+    if (connection == NULL || request_id == 0 || expected_packet_id == NULL ||
+        delivery_id == NULL)
     {
         return CLIENT_CONNECTION_INVALID_ARGUMENT;
     }
 
-    if (net_wait_readable(&connection->socket, 1, 0, &readable) != NET_STATUS_OK)
+    for (index = 0; index < CLIENT_CONNECTION_MAX_PENDING_RESPONSES; ++index)
     {
-        return CLIENT_CONNECTION_RECEIVE_FAILED;
-    }
-    if (!readable)
-    {
-        return CLIENT_CONNECTION_NO_MESSAGE;
+        ClientConnectionPendingResponse *response = &connection->pending_responses[index];
+        ProtocolDeliveryReference reference;
+
+        if (!response->in_use || response->request_id != request_id)
+        {
+            continue;
+        }
+        if (response->type == PROTOCOL_FRAME_ERROR)
+        {
+            sodium_memzero(response, sizeof(*response));
+            return CLIENT_CONNECTION_MESSAGE_REJECTED;
+        }
+        if (response->type != PROTOCOL_FRAME_SEND_ACCEPTED ||
+            protocol_decode_delivery_reference(response->payload,
+                                               response->payload_length,
+                                               &reference) != PROTOCOL_STATUS_OK ||
+            memcmp(reference.packet_id, expected_packet_id,
+                   sizeof(reference.packet_id)) != 0)
+        {
+            sodium_memzero(response, sizeof(*response));
+            return CLIENT_CONNECTION_PROTOCOL_FAILED;
+        }
+
+        *delivery_id = reference.delivery_id;
+        sodium_memzero(response, sizeof(*response));
+        return CLIENT_CONNECTION_OK;
     }
 
-    status = client_connection_receive_application_frame(
-        connection, &frame_bytes, &frame_size, &frame);
-    if (status != CLIENT_CONNECTION_OK)
-    {
-        return status;
-    }
-    if (frame.type == PROTOCOL_FRAME_ERROR)
-    {
-        free(frame_bytes);
-        return CLIENT_CONNECTION_MESSAGE_REJECTED;
-    }
-    if (frame.type != PROTOCOL_FRAME_DELIVER ||
-        protocol_decode_deliver(frame.payload, frame.payload_length, &deliver) !=
-            PROTOCOL_STATUS_OK ||
-        protocol_decode_packet(deliver.packet, deliver.packet_length, &packet) !=
-            PROTOCOL_STATUS_OK ||
-        protocol_validate_delivered_packet(&deliver, &packet, identity->public_key) !=
-            PROTOCOL_STATUS_OK ||
-        packet.kind != PROTOCOL_PACKET_TEXT_MESSAGE ||
-        crypto_sign_verify_detached(packet.signature, packet.signed_bytes,
-                                    (unsigned long long)packet.signed_length,
-                                    packet.sender_public_key) != 0 ||
-        protocol_decode_content(packet.payload, packet.payload_length, &content) !=
-            PROTOCOL_STATUS_OK ||
-        content.type != PROTOCOL_CONTENT_TEXT ||
-        protocol_decode_text_data(content.data, content.data_length, &decoded_text) !=
-            PROTOCOL_STATUS_OK)
-    {
-        free(frame_bytes);
-        return CLIENT_CONNECTION_PROTOCOL_FAILED;
-    }
-
-    if ((size_t)decoded_text.text_length + 1u > text_capacity)
-    {
-        (void)client_connection_acknowledge_delivery(
-            connection, &deliver, PROTOCOL_ACK_REJECTED);
-        free(frame_bytes);
-        return CLIENT_CONNECTION_PROTOCOL_FAILED;
-    }
-
-    status = client_connection_acknowledge_delivery(
-        connection, &deliver, PROTOCOL_ACK_STORED);
-    if (status == CLIENT_CONNECTION_OK)
-    {
-        memcpy(sender_id, deliver.sender_id, PROTOCOL_IDENTITY_ID_SIZE);
-        memcpy(text, decoded_text.text, decoded_text.text_length);
-        text[decoded_text.text_length] = '\0';
-        *sender_timestamp_unix_ms = decoded_text.sender_timestamp_unix_ms;
-    }
-    free(frame_bytes);
-    return status;
+    return CLIENT_CONNECTION_NO_MESSAGE;
 }
 
 bool client_connection_is_open(const ClientConnection *connection)
@@ -745,6 +924,8 @@ const char *client_connection_status_string(ClientConnectionStatus status)
             return "could not authenticate this client";
         case CLIENT_CONNECTION_MESSAGE_REJECTED:
             return "message was rejected by the server";
+        case CLIENT_CONNECTION_STORAGE_FAILED:
+            return "could not save the received message";
         case CLIENT_CONNECTION_NO_MESSAGE:
             return "no message available";
         default:
