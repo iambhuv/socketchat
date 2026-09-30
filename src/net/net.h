@@ -22,6 +22,7 @@ typedef enum NetStatus
     NET_STATUS_LISTEN_FAILED,
     NET_STATUS_ACCEPT_FAILED,
     NET_STATUS_CLOSED,
+    NET_STATUS_TIMED_OUT,
     NET_STATUS_IO_FAILED
 } NetStatus;
 
@@ -71,6 +72,10 @@ NetStatus net_receive_some(
 /* These functions keep working until the complete buffer is transferred. */
 NetStatus net_send_all(NetSocket socket, const void *data, size_t size);
 NetStatus net_receive_exact(NetSocket socket, void *data, size_t size);
+
+/* Reads the complete buffer within one total deadline. */
+NetStatus net_receive_exact_timeout(
+    NetSocket socket, void *data, size_t size, int timeout_milliseconds);
 
 void net_close(NetSocket *socket);
 

@@ -114,6 +114,20 @@ int main(void)
             1);
     }
 
+    /* One byte from a stalled peer must not keep a handshake read open forever. */
+    if (!status_is_ok(net_send_all(server_socket, server_message, 1),
+                      "partial net_send_all") ||
+        net_receive_exact_timeout(client_socket, received, 2, 50) !=
+            NET_STATUS_TIMED_OUT)
+    {
+        fprintf(stderr, "partial receive did not time out\n");
+        return finish_test(
+            &listening_socket,
+            &client_socket,
+            &server_socket,
+            1);
+    }
+
     net_close(&client_socket);
 
     {

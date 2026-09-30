@@ -10,6 +10,7 @@
 #define CLIENT_AUTHENTICATE_REQUEST_ID 2u
 #define CLIENT_SEND_REQUEST_ID 3u
 #define CLIENT_ACKNOWLEDGE_REQUEST_ID 4u
+#define CLIENT_HANDSHAKE_TIMEOUT_MS 5000
 
 static uint64_t client_current_unix_ms(void)
 {
@@ -120,7 +121,9 @@ static ClientConnectionStatus client_connection_receive_encrypted_frame(
         return CLIENT_CONNECTION_INVALID_ARGUMENT;
     }
 
-    if (net_receive_exact(connection->socket, prefix, sizeof(prefix)) != NET_STATUS_OK)
+    if (net_receive_exact_timeout(
+            connection->socket, prefix, sizeof(prefix),
+            CLIENT_HANDSHAKE_TIMEOUT_MS) != NET_STATUS_OK)
     {
         client_connection_close(connection);
         return CLIENT_CONNECTION_RECEIVE_FAILED;
@@ -136,7 +139,9 @@ static ClientConnectionStatus client_connection_receive_encrypted_frame(
                         ((uint32_t)prefix[2] << 8) | (uint32_t)prefix[3];
     if (protocol_transport_record_size(ciphertext_length) == 0 ||
         ciphertext_length - PROTOCOL_AEAD_TAG_SIZE > plaintext_capacity ||
-        net_receive_exact(connection->socket, record + sizeof(prefix), ciphertext_length) != NET_STATUS_OK ||
+        net_receive_exact_timeout(
+            connection->socket, record + sizeof(prefix), ciphertext_length,
+            CLIENT_HANDSHAKE_TIMEOUT_MS) != NET_STATUS_OK ||
         protocol_decode_transport_record(record, sizeof(prefix) + ciphertext_length,
                                          &transport_record, &consumed) != PROTOCOL_STATUS_OK ||
         transport_record.sequence != connection->receive_sequence ||
@@ -295,7 +300,9 @@ ClientConnectionStatus client_connection_finish_handshake(
         return CLIENT_CONNECTION_INVALID_ARGUMENT;
     }
 
-    if (net_receive_exact(connection->socket, bytes, PROTOCOL_FRAME_HEADER_SIZE) != NET_STATUS_OK)
+    if (net_receive_exact_timeout(
+            connection->socket, bytes, PROTOCOL_FRAME_HEADER_SIZE,
+            CLIENT_HANDSHAKE_TIMEOUT_MS) != NET_STATUS_OK)
     {
         client_connection_close(connection);
         return CLIENT_CONNECTION_RECEIVE_FAILED;
@@ -303,7 +310,9 @@ ClientConnectionStatus client_connection_finish_handshake(
     payload_size = ((uint32_t)bytes[12] << 24) | ((uint32_t)bytes[13] << 16) |
                    ((uint32_t)bytes[14] << 8) | (uint32_t)bytes[15];
     if (payload_size != PROTOCOL_CHALLENGE_PAYLOAD_SIZE ||
-        net_receive_exact(connection->socket, bytes + PROTOCOL_FRAME_HEADER_SIZE, payload_size) != NET_STATUS_OK ||
+        net_receive_exact_timeout(
+            connection->socket, bytes + PROTOCOL_FRAME_HEADER_SIZE, payload_size,
+            CLIENT_HANDSHAKE_TIMEOUT_MS) != NET_STATUS_OK ||
         protocol_decode_frame(bytes, PROTOCOL_FRAME_HEADER_SIZE + payload_size, &frame, &consumed) != PROTOCOL_STATUS_OK ||
         frame.type != PROTOCOL_FRAME_CHALLENGE || frame.request_id != connection->hello_request_id ||
         protocol_decode_challenge(frame.payload, frame.payload_length, &challenge) != PROTOCOL_STATUS_OK ||
@@ -687,18 +696,18 @@ ClientConnectionStatus client_connection_pump(
             }
             if (status == CLIENT_CONNECTION_OK)
             {
+                /* Dispatch can close the socket and free receive_buffer. */
+                memmove(connection->receive_buffer,
+                        connection->receive_buffer + record_size,
+                        connection->receive_buffer_size - record_size);
+                connection->receive_buffer_size -= record_size;
+                processed_frame = true;
                 status = client_connection_dispatch_frame(connection, database, identity,
                                                           &frame);
             }
             sodium_memzero(plaintext,
                            transport_record.ciphertext_length - PROTOCOL_AEAD_TAG_SIZE);
             free(plaintext);
-
-            memmove(connection->receive_buffer,
-                    connection->receive_buffer + record_size,
-                    connection->receive_buffer_size - record_size);
-            connection->receive_buffer_size -= record_size;
-            processed_frame = true;
             if (status != CLIENT_CONNECTION_OK)
             {
                 if (status == CLIENT_CONNECTION_PROTOCOL_FAILED ||

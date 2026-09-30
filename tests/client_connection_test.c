@@ -333,11 +333,31 @@ int main(void)
                          delivery_record_size - 5) == NET_STATUS_OK);
     REQUIRE(net_send_all(buffered_server_socket, accepted_record,
                          accepted_record_size) == NET_STATUS_OK);
-    REQUIRE(client_connection_pump(&connection, &database, &identity) ==
-            CLIENT_CONNECTION_OK);
-    REQUIRE(client_connection_take_send_result(&connection, send_request_id,
-                                               sent_packet_id, &delivery_id) ==
-            CLIENT_CONNECTION_OK);
+    {
+        int attempt;
+        ClientConnectionStatus send_status = CLIENT_CONNECTION_NO_MESSAGE;
+
+        for (attempt = 0; attempt < 20 &&
+                          send_status == CLIENT_CONNECTION_NO_MESSAGE; ++attempt)
+        {
+            bool ready = false;
+            ClientConnectionStatus pump_status;
+
+            REQUIRE(net_wait_readable(&connection.socket, 1, 50, &ready) ==
+                    NET_STATUS_OK);
+            if (!ready)
+            {
+                continue;
+            }
+
+            pump_status = client_connection_pump(&connection, &database, &identity);
+            REQUIRE(pump_status == CLIENT_CONNECTION_OK ||
+                    pump_status == CLIENT_CONNECTION_NO_MESSAGE);
+            send_status = client_connection_take_send_result(
+                &connection, send_request_id, sent_packet_id, &delivery_id);
+        }
+        REQUIRE(send_status == CLIENT_CONNECTION_OK);
+    }
     REQUIRE(delivery_id == 23);
     REQUIRE(client_database_load_messages(&database, sender_identity.public_key,
                                           messages, 2, &message_count) ==

@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 
@@ -649,6 +650,83 @@ NetStatus net_receive_exact(NetSocket socket, void *data, size_t size)
     return NET_STATUS_OK;
 }
 
+static bool net_now_milliseconds(uint64_t *milliseconds)
+{
+    struct timespec now;
+
+    if (timespec_get(&now, TIME_UTC) != TIME_UTC || now.tv_sec < 0)
+    {
+        return false;
+    }
+
+    *milliseconds = (uint64_t)now.tv_sec * 1000u +
+                    (uint64_t)now.tv_nsec / 1000000u;
+    return true;
+}
+
+NetStatus net_receive_exact_timeout(
+    NetSocket socket, void *data, size_t size, int timeout_milliseconds)
+{
+    unsigned char *bytes = data;
+    size_t received_total = 0;
+    uint64_t started_at;
+
+    if (!net_socket_is_valid(socket) || (data == NULL && size > 0) ||
+        timeout_milliseconds < 0)
+    {
+        return NET_STATUS_INVALID_ARGUMENT;
+    }
+    if (!net_initialized)
+    {
+        return NET_STATUS_NOT_INITIALIZED;
+    }
+    if (!net_now_milliseconds(&started_at))
+    {
+        return NET_STATUS_IO_FAILED;
+    }
+
+    while (received_total < size)
+    {
+        uint64_t now;
+        uint64_t elapsed;
+        bool readable;
+        size_t received;
+        NetStatus status;
+
+        if (!net_now_milliseconds(&now))
+        {
+            return NET_STATUS_IO_FAILED;
+        }
+        elapsed = now >= started_at ? now - started_at : 0;
+        if (elapsed >= (uint64_t)timeout_milliseconds)
+        {
+            return NET_STATUS_TIMED_OUT;
+        }
+
+        status = net_wait_readable(&socket, 1,
+                                   timeout_milliseconds - (int)elapsed,
+                                   &readable);
+        if (status != NET_STATUS_OK)
+        {
+            return status;
+        }
+        if (!readable)
+        {
+            return NET_STATUS_TIMED_OUT;
+        }
+
+        status = net_receive_some(socket, bytes + received_total,
+                                  size - received_total, &received);
+        if (status != NET_STATUS_OK)
+        {
+            return status;
+        }
+        received_total += received;
+    }
+
+    return NET_STATUS_OK;
+}
+
 void net_close(NetSocket *socket)
 {
     if (socket == NULL || !net_socket_is_valid(*socket))
@@ -684,6 +762,8 @@ const char *net_status_string(NetStatus status)
             return "accept failed";
         case NET_STATUS_CLOSED:
             return "connection closed";
+        case NET_STATUS_TIMED_OUT:
+            return "timed out";
         case NET_STATUS_IO_FAILED:
             return "network input/output failed";
         default:
