@@ -102,7 +102,62 @@ ServerSessionResult server_session_handle_frame(
         return SERVER_SESSION_UNEXPECTED_FRAME;
     }
 
-    /* AUTHENTICATE and encrypted transport are the next server slice. */
+    if (frame->type == PROTOCOL_FRAME_AUTHENTICATE && !session->authenticated)
+    {
+        uint8_t signature[PROTOCOL_SIGNATURE_SIZE];
+        uint8_t signature_data[256];
+        size_t signature_data_size;
+
+        if (protocol_decode_authenticate(frame->payload, frame->payload_length, signature) != PROTOCOL_STATUS_OK ||
+            protocol_build_client_auth_signature_data(signature_data, sizeof(signature_data),
+                                                      &session->hello, &session->challenge,
+                                                      &signature_data_size) != PROTOCOL_STATUS_OK ||
+            crypto_sign_verify_detached(signature, signature_data,
+                                        (unsigned long long)signature_data_size,
+                                        session->hello.identity_public_key) != 0 ||
+            crypto_kx_server_session_keys(session->receive_key, session->send_key,
+                                          session->challenge.server_ephemeral_public_key,
+                                          session->server_ephemeral_secret_key,
+                                          session->hello.client_ephemeral_public_key) != 0)
+        {
+            sodium_memzero(signature_data, sizeof(signature_data));
+            return SERVER_SESSION_INVALID_PAYLOAD;
+        }
+
+        sodium_memzero(signature_data, sizeof(signature_data));
+        ProtocolAuthenticated authenticated;
+        uint8_t payload[PROTOCOL_IDENTITY_ID_SIZE + 4u];
+        size_t payload_size;
+
+        memcpy(authenticated.identity_id, session->hello.identity_public_key,
+               sizeof(authenticated.identity_id));
+        authenticated.queued_packet_count = 0;
+        if (protocol_encode_authenticated(payload, sizeof(payload), &authenticated,
+                                         &payload_size) != PROTOCOL_STATUS_OK ||
+            protocol_encode_frame(response, response_capacity,
+                                  PROTOCOL_FRAME_AUTHENTICATED,
+                                  frame->request_id, payload,
+                                  (uint32_t)payload_size,
+                                  response_size) != PROTOCOL_STATUS_OK)
+        {
+            return SERVER_SESSION_OUTPUT_TOO_SMALL;
+        }
+
+        session->authenticated = true;
+        return SERVER_SESSION_REPLY_READY;
+    }
+
+    if (session->authenticated && frame->type == PROTOCOL_FRAME_PING)
+    {
+        if (protocol_encode_frame(response, response_capacity, PROTOCOL_FRAME_PONG,
+                                  frame->request_id, frame->payload,
+                                  frame->payload_length, response_size) != PROTOCOL_STATUS_OK)
+        {
+            return SERVER_SESSION_OUTPUT_TOO_SMALL;
+        }
+        return SERVER_SESSION_REPLY_READY;
+    }
+
     return SERVER_SESSION_UNEXPECTED_FRAME;
 }
 

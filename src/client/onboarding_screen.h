@@ -26,6 +26,7 @@ void onboarding_screen_init(OnboardingScreen *screen);
 bool onboarding_screen_draw(OnboardingScreen *screen);
 
 const char *onboarding_screen_username(const OnboardingScreen *screen);
+void onboarding_screen_set_username(OnboardingScreen *screen, const char *username);
 void onboarding_screen_set_status(
     OnboardingScreen *screen,
     UiStatusKind kind,

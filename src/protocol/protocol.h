@@ -90,7 +90,9 @@ typedef enum ProtocolPacketKind
 {
     PROTOCOL_PACKET_CHAT_KEY_OFFER = 0x01,
     PROTOCOL_PACKET_CHAT_KEY_ACCEPT = 0x02,
-    PROTOCOL_PACKET_ENCRYPTED_MESSAGE = 0x03
+    PROTOCOL_PACKET_ENCRYPTED_MESSAGE = 0x03,
+    /* A signed direct-text packet. Its transport is encrypted client-to-server. */
+    PROTOCOL_PACKET_TEXT_MESSAGE = 0x04
 } ProtocolPacketKind;
 
 typedef enum ProtocolAcknowledgeResult

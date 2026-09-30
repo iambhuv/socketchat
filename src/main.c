@@ -9,8 +9,9 @@
 #include "ui/ui_font.h"
 
 #include <stdio.h>
+#include <string.h>
 
-int main(void)
+int main(int argc, char *argv[])
 {
     const int initialWindowWidth = 960;
     const int initialWindowHeight = 600;
@@ -19,8 +20,21 @@ int main(void)
     ClientConnection connection;
     ClientIdentity identity;
     bool identity_was_created;
+    bool account_was_found = false;
+    bool reconnect_pending;
     bool chat_open = false;
+    const char *client_database_path = APP_CLIENT_DATABASE_PATH;
     OnboardingScreen onboarding_screen;
+
+    if (argc == 3 && strcmp(argv[1], "--database") == 0 && argv[2][0] != '\0')
+    {
+        client_database_path = argv[2];
+    }
+    else if (argc != 1)
+    {
+        fprintf(stderr, "Usage: socket_chat [--database path-to-profile.db]\n");
+        return 1;
+    }
 
     if (!dependencies_initialize())
     {
@@ -39,13 +53,27 @@ int main(void)
 
     database_status = client_database_open(
         &database,
-        APP_CLIENT_DATABASE_PATH);
+        client_database_path);
     if (database_status == CLIENT_DATABASE_OK)
     {
         database_status = client_database_load_or_create_identity(
             &database,
             &identity,
             &identity_was_created);
+    }
+    if (database_status == CLIENT_DATABASE_OK)
+    {
+        database_status = client_database_ensure_self_contact(&database, &identity);
+    }
+    if (database_status == CLIENT_DATABASE_OK)
+    {
+        char saved_username[ONBOARDING_USERNAME_CAPACITY];
+        database_status = client_database_load_account_username(
+            &database, saved_username, sizeof(saved_username), &account_was_found);
+        if (database_status == CLIENT_DATABASE_OK && account_was_found)
+        {
+            /* Applied after the Raylib UI state is initialized below. */
+        }
     }
 
     if (database_status != CLIENT_DATABASE_OK)
@@ -79,6 +107,19 @@ int main(void)
     SetTargetFPS(60);
     ui_font_load();
     onboarding_screen_init(&onboarding_screen);
+    reconnect_pending = account_was_found;
+    if (account_was_found)
+    {
+        char saved_username[ONBOARDING_USERNAME_CAPACITY];
+        bool found_again = false;
+        if (client_database_load_account_username(&database, saved_username,
+                                                  sizeof(saved_username), &found_again) == CLIENT_DATABASE_OK &&
+            found_again)
+        {
+            onboarding_screen_set_username(&onboarding_screen, saved_username);
+            onboarding_screen_set_status(&onboarding_screen, UI_STATUS_CONNECTING, "Reconnecting");
+        }
+    }
 
     while (!WindowShouldClose())
     {
@@ -88,16 +129,21 @@ int main(void)
 
         BeginDrawing();
         account_requested = !chat_open && onboarding_screen_draw(&onboarding_screen);
+        if (!chat_open && reconnect_pending)
+        {
+            account_requested = true;
+            reconnect_pending = false;
+        }
 
         if (chat_open)
         {
-            chat_screen_draw();
+            chat_screen_draw(&connection, &database, &identity);
         }
         EndDrawing();
 
         if (account_requested)
         {
-            const ClientConnectionStatus connection_status =
+            ClientConnectionStatus connection_status =
                 client_connection_connect(
                     &connection,
                     APP_SERVER_HOST,
@@ -108,10 +154,26 @@ int main(void)
             {
                 onboarding_screen_set_status(
                     &onboarding_screen,
+                    UI_STATUS_CONNECTING,
+                    "Verifying server");
+                connection_status = client_connection_finish_handshake(
+                    &connection,
+                    &database,
+                    APP_SERVER_HOST,
+                    APP_SERVER_PORT,
+                    &identity);
+            }
+
+            if (connection_status == CLIENT_CONNECTION_OK)
+            {
+                onboarding_screen_set_status(
+                    &onboarding_screen,
                     UI_STATUS_CONNECTED,
                     "Connected");
+                (void)client_database_save_account_username(
+                    &database, onboarding_screen_username(&onboarding_screen));
                 chat_open = true;
-                printf("Connected to the server and sent HELLO.\n");
+                printf("Connected with a verified server and authenticated identity.\n");
             }
             else
             {

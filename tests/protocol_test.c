@@ -404,6 +404,67 @@ static int test_encrypted_message_packet(void)
     return 1;
 }
 
+static int test_signed_direct_text_packet(void)
+{
+    static const uint8_t message_text[] = "Hello from another client";
+    uint8_t text_data[128];
+    uint8_t content[160];
+    uint8_t packet[512];
+    uint8_t packet_id[PROTOCOL_PACKET_ID_SIZE];
+    uint8_t sender_id[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE];
+    uint8_t recipient_id[PROTOCOL_IDENTITY_ID_SIZE];
+    uint8_t chat_id[PROTOCOL_CHAT_ID_SIZE];
+    uint8_t signature[PROTOCOL_SIGNATURE_SIZE];
+    ProtocolText text;
+    ProtocolContent decoded_content;
+    ProtocolText decoded_text;
+    ProtocolPacket decoded_packet;
+    ProtocolSend send = { 0 };
+    size_t text_data_size = 0;
+    size_t content_size = 0;
+    size_t unsigned_packet_size = 0;
+    size_t packet_size = 0;
+
+    fill_bytes(packet_id, sizeof(packet_id), 0x11);
+    fill_bytes(sender_id, sizeof(sender_id), 0x31);
+    fill_bytes(recipient_id, sizeof(recipient_id), 0x51);
+    fill_bytes(chat_id, sizeof(chat_id), 0x71);
+    fill_bytes(signature, sizeof(signature), 0x91);
+    text.sender_timestamp_unix_ms = UINT64_C(1777000000456);
+    text.text = message_text;
+    text.text_length = sizeof(message_text) - 1u;
+
+    CHECK(protocol_encode_text_data(text_data, sizeof(text_data), &text,
+              &text_data_size) == PROTOCOL_STATUS_OK);
+    CHECK(protocol_encode_content(content, sizeof(content), PROTOCOL_CONTENT_TEXT,
+              text_data, (uint32_t)text_data_size, &content_size) ==
+          PROTOCOL_STATUS_OK);
+    CHECK(protocol_encode_unsigned_packet(packet, sizeof(packet),
+              PROTOCOL_PACKET_TEXT_MESSAGE, packet_id, sender_id, recipient_id,
+              chat_id, content, (uint32_t)content_size, &unsigned_packet_size) ==
+          PROTOCOL_STATUS_OK);
+    CHECK(protocol_append_packet_signature(packet, sizeof(packet),
+              unsigned_packet_size, signature, &packet_size) == PROTOCOL_STATUS_OK);
+    CHECK(protocol_decode_packet(packet, packet_size, &decoded_packet) ==
+          PROTOCOL_STATUS_OK);
+    CHECK(decoded_packet.kind == PROTOCOL_PACKET_TEXT_MESSAGE);
+
+    memcpy(send.packet_id, packet_id, sizeof(send.packet_id));
+    memcpy(send.recipient_id, recipient_id, sizeof(send.recipient_id));
+    send.packet = packet;
+    send.packet_length = (uint32_t)packet_size;
+    CHECK(protocol_validate_send_packet(&send, &decoded_packet, sender_id) ==
+          PROTOCOL_STATUS_OK);
+    CHECK(protocol_decode_content(decoded_packet.payload,
+              decoded_packet.payload_length, &decoded_content) == PROTOCOL_STATUS_OK);
+    CHECK(decoded_content.type == PROTOCOL_CONTENT_TEXT);
+    CHECK(protocol_decode_text_data(decoded_content.data, decoded_content.data_length,
+              &decoded_text) == PROTOCOL_STATUS_OK);
+    CHECK(decoded_text.text_length == text.text_length);
+    CHECK(memcmp(decoded_text.text, message_text, text.text_length) == 0);
+    return 1;
+}
+
 static int test_content_payloads(void)
 {
     static const uint8_t message_text[] = "Hello, world!";
@@ -481,6 +542,7 @@ int main(void)
     CHECK(test_server_payloads());
     CHECK(test_chat_key_packet());
     CHECK(test_encrypted_message_packet());
+    CHECK(test_signed_direct_text_packet());
     CHECK(test_content_payloads());
     CHECK(test_invalid_lengths_and_values());
 

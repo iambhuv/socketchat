@@ -7,18 +7,20 @@
 #include "server/server_identity.h"
 #include "server/server_session.h"
 
+#include <sodium.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define SERVER_MAX_CLIENTS 32u
 #define SERVER_LISTEN_BACKLOG 16
 #define SERVER_WAIT_MILLISECONDS 250
 #define SERVER_CLIENT_BUFFER_SIZE \
-    (PROTOCOL_FRAME_HEADER_SIZE + PROTOCOL_MAX_SERVER_PAYLOAD)
+    (PROTOCOL_TRANSPORT_HEADER_SIZE + PROTOCOL_MAX_TRANSPORT_CIPHERTEXT)
 
 typedef struct ServerClient
 {
@@ -29,6 +31,13 @@ typedef struct ServerClient
 } ServerClient;
 
 static volatile sig_atomic_t server_stop_requested = 0;
+
+static uint64_t server_current_unix_ms(void)
+{
+    const time_t now = time(NULL);
+
+    return now > 0 ? (uint64_t)now * UINT64_C(1000) : 0;
+}
 
 static void server_handle_stop_signal(int signal_number)
 {
@@ -137,6 +146,258 @@ static bool server_send_error(
     return net_send_all(socket, frame_bytes, frame_size) == NET_STATUS_OK;
 }
 
+static bool server_send_response(ServerClient *client, const uint8_t *frame, size_t frame_size)
+{
+    uint8_t nonce[PROTOCOL_NONCE_SIZE];
+    uint8_t aad[64];
+    uint8_t *record;
+    uint32_t ciphertext_length;
+    size_t prefix_size;
+    size_t aad_size;
+    unsigned long long ciphertext_size;
+
+    if (!client->session.authenticated)
+    {
+        return net_send_all(client->socket, frame, frame_size) == NET_STATUS_OK;
+    }
+    if (client->session.send_sequence == UINT64_MAX ||
+        frame_size > UINT32_MAX - PROTOCOL_AEAD_TAG_SIZE)
+    {
+        return false;
+    }
+    ciphertext_length = (uint32_t)frame_size + PROTOCOL_AEAD_TAG_SIZE;
+    if (protocol_transport_record_size(ciphertext_length) == 0)
+    {
+        return false;
+    }
+    record = malloc(protocol_transport_record_size(ciphertext_length));
+    if (record == NULL ||
+        protocol_encode_transport_record_prefix(record,
+                                                protocol_transport_record_size(ciphertext_length),
+                                                client->session.send_sequence, ciphertext_length,
+                                                &prefix_size) != PROTOCOL_STATUS_OK ||
+        protocol_build_transport_nonce(nonce, client->session.send_sequence) != PROTOCOL_STATUS_OK ||
+        protocol_build_transport_authenticated_data(aad, sizeof(aad),
+                                                    client->session.send_sequence, ciphertext_length,
+                                                    &aad_size) != PROTOCOL_STATUS_OK ||
+        crypto_aead_xchacha20poly1305_ietf_encrypt(
+            record + prefix_size, &ciphertext_size, frame, (unsigned long long)frame_size,
+            aad, (unsigned long long)aad_size, NULL, nonce, client->session.send_key) != 0 ||
+        ciphertext_size != ciphertext_length)
+    {
+        free(record);
+        return false;
+    }
+    if (net_send_all(client->socket, record,
+                     protocol_transport_record_size(ciphertext_length)) != NET_STATUS_OK)
+    {
+        free(record);
+        return false;
+    }
+    free(record);
+    ++client->session.send_sequence;
+    return true;
+}
+
+static bool server_send_client_error(
+    ServerClient *client,
+    uint32_t request_id,
+    ProtocolErrorCode code,
+    const char *text)
+{
+    uint8_t payload[4u + PROTOCOL_MAX_ERROR_MESSAGE_SIZE];
+    uint8_t frame[PROTOCOL_FRAME_HEADER_SIZE + 4u + PROTOCOL_MAX_ERROR_MESSAGE_SIZE];
+    ProtocolError message;
+    size_t payload_size;
+    size_t frame_size;
+
+    message.code = code;
+    message.message = (const uint8_t *)text;
+    message.message_length = (uint16_t)strlen(text);
+    if (message.message_length > PROTOCOL_MAX_ERROR_MESSAGE_SIZE ||
+        protocol_encode_error(payload, sizeof(payload), &message, &payload_size) !=
+            PROTOCOL_STATUS_OK ||
+        protocol_encode_frame(frame, sizeof(frame), PROTOCOL_FRAME_ERROR, request_id,
+                              payload, (uint32_t)payload_size, &frame_size) !=
+            PROTOCOL_STATUS_OK)
+    {
+        return false;
+    }
+
+    return server_send_response(client, frame, frame_size);
+}
+
+static ServerClient *server_find_authenticated_client(
+    ServerClient clients[SERVER_MAX_CLIENTS],
+    const uint8_t identity[PROTOCOL_IDENTITY_ID_SIZE])
+{
+    size_t index;
+
+    for (index = 0; index < SERVER_MAX_CLIENTS; ++index)
+    {
+        ServerClient *candidate = &clients[index];
+
+        if (net_socket_is_valid(candidate->socket) &&
+            candidate->session.authenticated &&
+            sodium_memcmp(candidate->session.hello.identity_public_key, identity,
+                          PROTOCOL_IDENTITY_ID_SIZE) == 0)
+        {
+            return candidate;
+        }
+    }
+
+    return NULL;
+}
+
+static bool server_handle_send(
+    ServerClient clients[SERVER_MAX_CLIENTS],
+    size_t sender_index,
+    const ProtocolFrame *frame,
+    uint64_t *next_delivery_id)
+{
+    ServerClient *sender = &clients[sender_index];
+    ServerClient *recipient;
+    size_t recipient_index;
+    ProtocolSend send;
+    ProtocolPacket packet;
+    ProtocolDeliveryReference accepted;
+    ProtocolDeliver deliver;
+    uint8_t accepted_payload[8u + PROTOCOL_PACKET_ID_SIZE];
+    uint8_t accepted_frame[PROTOCOL_FRAME_HEADER_SIZE + sizeof(accepted_payload)];
+    uint8_t *deliver_payload = NULL;
+    uint8_t *deliver_frame = NULL;
+    size_t accepted_payload_size;
+    size_t accepted_frame_size;
+    size_t deliver_payload_size;
+    size_t deliver_frame_size;
+    bool delivered = false;
+
+    if (next_delivery_id == NULL ||
+        protocol_decode_send(frame->payload, frame->payload_length, &send) !=
+            PROTOCOL_STATUS_OK ||
+        protocol_decode_packet(send.packet, send.packet_length, &packet) !=
+            PROTOCOL_STATUS_OK ||
+        protocol_validate_send_packet(&send, &packet,
+                                      sender->session.hello.identity_public_key) !=
+            PROTOCOL_STATUS_OK ||
+        packet.kind != PROTOCOL_PACKET_TEXT_MESSAGE ||
+        crypto_sign_verify_detached(packet.signature, packet.signed_bytes,
+                                    (unsigned long long)packet.signed_length,
+                                    packet.sender_public_key) != 0)
+    {
+        return server_send_client_error(sender, frame->request_id,
+                                        PROTOCOL_ERROR_INVALID_REQUEST,
+                                        "invalid private message");
+    }
+
+    recipient = server_find_authenticated_client(clients, send.recipient_id);
+    if (recipient == NULL)
+    {
+        return server_send_client_error(sender, frame->request_id,
+                                        PROTOCOL_ERROR_INVALID_REQUEST,
+                                        "recipient is offline");
+    }
+    recipient_index = (size_t)(recipient - clients);
+    if (*next_delivery_id == 0 || *next_delivery_id == UINT64_MAX)
+    {
+        return server_send_client_error(sender, frame->request_id,
+                                        PROTOCOL_ERROR_QUEUE_FULL,
+                                        "delivery counter exhausted");
+    }
+
+    accepted.delivery_id = *next_delivery_id;
+    memcpy(accepted.packet_id, send.packet_id, sizeof(accepted.packet_id));
+    if (protocol_encode_delivery_reference(accepted_payload, sizeof(accepted_payload),
+                                           &accepted, &accepted_payload_size) !=
+            PROTOCOL_STATUS_OK ||
+        protocol_encode_frame(accepted_frame, sizeof(accepted_frame),
+                              PROTOCOL_FRAME_SEND_ACCEPTED, frame->request_id,
+                              accepted_payload, (uint32_t)accepted_payload_size,
+                              &accepted_frame_size) != PROTOCOL_STATUS_OK)
+    {
+        return false;
+    }
+
+    deliver.delivery_id = *next_delivery_id;
+    memcpy(deliver.packet_id, send.packet_id, sizeof(deliver.packet_id));
+    memcpy(deliver.sender_id, sender->session.hello.identity_public_key,
+           sizeof(deliver.sender_id));
+    deliver.server_received_at_unix_ms = server_current_unix_ms();
+    deliver.packet = send.packet;
+    deliver.packet_length = send.packet_length;
+    deliver_payload_size = protocol_deliver_payload_size(deliver.packet_length);
+    if (deliver_payload_size == 0)
+    {
+        return false;
+    }
+    deliver_payload = malloc(deliver_payload_size);
+    deliver_frame = malloc(PROTOCOL_FRAME_HEADER_SIZE + deliver_payload_size);
+    if (deliver_payload == NULL || deliver_frame == NULL ||
+        protocol_encode_deliver(deliver_payload, deliver_payload_size, &deliver,
+                                &deliver_payload_size) != PROTOCOL_STATUS_OK ||
+        protocol_encode_frame(deliver_frame,
+                              PROTOCOL_FRAME_HEADER_SIZE + deliver_payload_size,
+                              PROTOCOL_FRAME_DELIVER, 0, deliver_payload,
+                              (uint32_t)deliver_payload_size,
+                              &deliver_frame_size) != PROTOCOL_STATUS_OK)
+    {
+        free(deliver_payload);
+        free(deliver_frame);
+        return false;
+    }
+
+    /* The acceptance must arrive first for the self-chat case, where sender
+     * and recipient are the same socket. */
+    if (server_send_response(sender, accepted_frame, accepted_frame_size))
+    {
+        delivered = server_send_response(recipient, deliver_frame, deliver_frame_size);
+    }
+    free(deliver_payload);
+    free(deliver_frame);
+    if (!delivered)
+    {
+        server_disconnect_client(clients, recipient_index, "could not receive delivery");
+        return true;
+    }
+
+    ++*next_delivery_id;
+    printf("Delivered private message from client %zu.\n", sender_index + 1u);
+    return true;
+}
+
+static bool server_handle_acknowledge(
+    ServerClient *client,
+    const ProtocolFrame *frame)
+{
+    ProtocolAcknowledge acknowledge;
+    ProtocolDeliveryReference reference;
+    uint8_t payload[8u + PROTOCOL_PACKET_ID_SIZE];
+    uint8_t response[PROTOCOL_FRAME_HEADER_SIZE + sizeof(payload)];
+    size_t payload_size;
+    size_t response_size;
+
+    if (protocol_decode_acknowledge(frame->payload, frame->payload_length,
+                                    &acknowledge) != PROTOCOL_STATUS_OK)
+    {
+        return server_send_client_error(client, frame->request_id,
+                                        PROTOCOL_ERROR_INVALID_REQUEST,
+                                        "invalid delivery acknowledgement");
+    }
+
+    reference.delivery_id = acknowledge.delivery_id;
+    memcpy(reference.packet_id, acknowledge.packet_id, sizeof(reference.packet_id));
+    if (protocol_encode_delivery_reference(payload, sizeof(payload), &reference,
+                                           &payload_size) != PROTOCOL_STATUS_OK ||
+        protocol_encode_frame(response, sizeof(response), PROTOCOL_FRAME_ACKNOWLEDGED,
+                              frame->request_id, payload, (uint32_t)payload_size,
+                              &response_size) != PROTOCOL_STATUS_OK)
+    {
+        return false;
+    }
+
+    return server_send_response(client, response, response_size);
+}
+
 static void server_print_claimed_identity(
     size_t client_index,
     const uint8_t identity[PROTOCOL_IDENTITY_PUBLIC_KEY_SIZE])
@@ -154,13 +415,25 @@ static void server_print_claimed_identity(
 }
 
 static bool server_handle_frame(
-    ServerClient *client,
+    ServerClient clients[SERVER_MAX_CLIENTS],
     size_t client_index,
     const ServerIdentity *identity,
+    uint64_t *next_delivery_id,
     const ProtocolFrame *frame)
 {
+    ServerClient *client = &clients[client_index];
     uint8_t response[SERVER_SESSION_MAX_RESPONSE_SIZE];
     size_t response_size;
+
+    if (client->session.authenticated && frame->type == PROTOCOL_FRAME_SEND)
+    {
+        return server_handle_send(clients, client_index, frame, next_delivery_id);
+    }
+    if (client->session.authenticated && frame->type == PROTOCOL_FRAME_ACKNOWLEDGE)
+    {
+        return server_handle_acknowledge(client, frame);
+    }
+
     ServerSessionResult result = server_session_handle_frame(
         &client->session,
         identity,
@@ -171,7 +444,7 @@ static bool server_handle_frame(
 
     if (result == SERVER_SESSION_REPLY_READY)
     {
-        if (net_send_all(client->socket, response, response_size) != NET_STATUS_OK)
+        if (!server_send_response(client, response, response_size))
         {
             return false;
         }
@@ -188,11 +461,20 @@ static bool server_handle_frame(
 
     if (result != SERVER_SESSION_ACCEPTED)
     {
-        server_send_error(
-            client->socket,
-            frame->request_id,
-            PROTOCOL_ERROR_INVALID_REQUEST,
-            server_session_result_string(result));
+        if (client->session.authenticated)
+        {
+            (void)server_send_client_error(
+                client, frame->request_id, PROTOCOL_ERROR_INVALID_REQUEST,
+                server_session_result_string(result));
+        }
+        else
+        {
+            (void)server_send_error(
+                client->socket,
+                frame->request_id,
+                PROTOCOL_ERROR_INVALID_REQUEST,
+                server_session_result_string(result));
+        }
         return false;
     }
 
@@ -202,7 +484,8 @@ static bool server_handle_frame(
 static void server_read_from_client(
     ServerClient clients[SERVER_MAX_CLIENTS],
     size_t client_index,
-    const ServerIdentity *identity)
+    const ServerIdentity *identity,
+    uint64_t *next_delivery_id)
 {
     ServerClient *client = &clients[client_index];
     size_t received_size;
@@ -239,12 +522,56 @@ static void server_read_from_client(
     while (client->buffered_size > 0)
     {
         ProtocolFrame frame;
-        size_t consumed_size;
-        ProtocolStatus protocol_status = protocol_decode_frame(
-            client->read_buffer,
-            client->buffered_size,
-            &frame,
-            &consumed_size);
+        size_t consumed_size = 0;
+        ProtocolStatus protocol_status;
+        uint8_t plaintext[PROTOCOL_FRAME_HEADER_SIZE + PROTOCOL_MAX_SERVER_PAYLOAD];
+
+        if (!client->session.authenticated)
+        {
+            protocol_status = protocol_decode_frame(
+                client->read_buffer,
+                client->buffered_size,
+                &frame,
+                &consumed_size);
+        }
+        else
+        {
+            ProtocolTransportRecord record;
+            uint8_t nonce[PROTOCOL_NONCE_SIZE];
+            uint8_t aad[64];
+            size_t record_size;
+            size_t aad_size;
+            size_t frame_consumed;
+            unsigned long long plaintext_size;
+
+            protocol_status = protocol_decode_transport_record(
+                client->read_buffer, client->buffered_size, &record, &record_size);
+            if (protocol_status == PROTOCOL_STATUS_OK)
+            {
+                if (record.sequence != client->session.receive_sequence ||
+                    client->session.receive_sequence == UINT64_MAX ||
+                    protocol_build_transport_nonce(nonce, record.sequence) != PROTOCOL_STATUS_OK ||
+                    protocol_build_transport_authenticated_data(aad, sizeof(aad), record.sequence,
+                                                                record.ciphertext_length,
+                                                                &aad_size) != PROTOCOL_STATUS_OK ||
+                    crypto_aead_xchacha20poly1305_ietf_decrypt(
+                        plaintext, &plaintext_size, NULL, record.ciphertext,
+                        record.ciphertext_length, aad, (unsigned long long)aad_size,
+                        nonce, client->session.receive_key) != 0 ||
+                    plaintext_size > sizeof(plaintext) ||
+                    protocol_decode_frame(plaintext, (size_t)plaintext_size, &frame,
+                                          &frame_consumed) != PROTOCOL_STATUS_OK ||
+                    frame_consumed != (size_t)plaintext_size)
+                {
+                    protocol_status = PROTOCOL_STATUS_INVALID_VALUE;
+                }
+                else
+                {
+                    consumed_size = record_size;
+                    ++client->session.receive_sequence;
+                }
+            }
+        }
 
         if (protocol_status == PROTOCOL_STATUS_NEED_MORE_DATA)
         {
@@ -253,11 +580,14 @@ static void server_read_from_client(
 
         if (protocol_status != PROTOCOL_STATUS_OK)
         {
-            server_send_error(
-                client->socket,
-                0,
-                PROTOCOL_ERROR_MALFORMED_FRAME,
-                protocol_status_string(protocol_status));
+            if (!client->session.authenticated)
+            {
+                server_send_error(
+                    client->socket,
+                    0,
+                    PROTOCOL_ERROR_MALFORMED_FRAME,
+                    protocol_status_string(protocol_status));
+            }
             server_disconnect_client(
                 clients,
                 client_index,
@@ -265,7 +595,8 @@ static void server_read_from_client(
             return;
         }
 
-        if (!server_handle_frame(client, client_index, identity, &frame))
+        if (!server_handle_frame(clients, client_index, identity,
+                                 next_delivery_id, &frame))
         {
             server_disconnect_client(clients, client_index, "invalid request");
             return;
@@ -329,6 +660,7 @@ int server_run(uint16_t port)
     ServerClient clients[SERVER_MAX_CLIENTS];
     ServerIdentity identity;
     NetSocket listening_socket = net_socket_invalid();
+    uint64_t next_delivery_id = 1;
     int exit_code = 0;
 
     server_stop_requested = 0;
@@ -431,7 +763,8 @@ int server_run(uint16_t port)
                 server_read_from_client(
                     clients,
                     client_indexes[socket_index],
-                    &identity);
+                    &identity,
+                    &next_delivery_id);
             }
         }
     }

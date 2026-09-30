@@ -26,6 +26,10 @@ int main(void)
     ClientIdentity created_identity;
     ClientIdentity loaded_identity;
     unsigned char signature[crypto_sign_BYTES];
+    unsigned char packet_id[PROTOCOL_PACKET_ID_SIZE] = { 0x42 };
+    ClientChatMessage messages[2];
+    uint32_t message_count;
+    bool was_inserted;
     bool was_created;
     bool dependencies_ready = false;
     int exit_code = 1;
@@ -65,6 +69,29 @@ int main(void)
                 message,
                 sizeof(message) - 1,
                 loaded_identity.public_key) == 0);
+
+    /* Histories are persistent and delivery retries are idempotent by packet ID. */
+    REQUIRE(client_database_store_message(
+                &database, loaded_identity.public_key, packet_id,
+                CLIENT_MESSAGE_INCOMING, 1234, (const uint8_t *)"saved message",
+                (uint32_t)strlen("saved message"), &was_inserted) ==
+            CLIENT_DATABASE_OK);
+    REQUIRE(was_inserted);
+    REQUIRE(client_database_store_message(
+                &database, loaded_identity.public_key, packet_id,
+                CLIENT_MESSAGE_INCOMING, 1234, (const uint8_t *)"saved message",
+                (uint32_t)strlen("saved message"), &was_inserted) ==
+            CLIENT_DATABASE_OK);
+    REQUIRE(!was_inserted);
+    client_database_close(&database);
+    REQUIRE(client_database_open(&database, database_path) == CLIENT_DATABASE_OK);
+    REQUIRE(client_database_load_messages(
+                &database, loaded_identity.public_key, messages, 2,
+                &message_count) == CLIENT_DATABASE_OK);
+    REQUIRE(message_count == 1);
+    REQUIRE(messages[0].direction == CLIENT_MESSAGE_INCOMING);
+    REQUIRE(messages[0].sender_timestamp_unix_ms == 1234);
+    REQUIRE(strcmp(messages[0].text, "saved message") == 0);
 
     REQUIRE(sqlite3_exec(
                 database.connection,

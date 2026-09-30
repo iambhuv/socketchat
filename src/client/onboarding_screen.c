@@ -237,6 +237,15 @@ const char *onboarding_screen_username(const OnboardingScreen *screen)
     return screen == NULL ? "" : screen->username;
 }
 
+void onboarding_screen_set_username(OnboardingScreen *screen, const char *username)
+{
+    if (screen == NULL || username == NULL)
+    {
+        return;
+    }
+    snprintf(screen->username, sizeof(screen->username), "%s", username);
+}
+
 void onboarding_screen_set_status(
     OnboardingScreen *screen,
     UiStatusKind kind,
