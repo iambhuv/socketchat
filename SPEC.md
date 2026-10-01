@@ -17,13 +17,36 @@ That is the whole product.
 
 ## Not building (on purpose)
 
-- Group chats, usernames on the server, offline delivery queues.
-- Transport encryption. The server reads messages in plaintext. If asked:
-  "we sign messages so nobody can forge a sender; encrypting the wire is the
-  next step and would use X25519 + an AEAD."
-- Server identity. The client does not verify who the server is. Same answer.
+- Group chats, usernames on the server.
+- Transport encryption and server identity. Message content is end-to-end
+  encrypted, so the wire only carries who is talking to whom. If asked:
+  "hiding that too would need X25519 + an AEAD between client and server;
+  the content is already unreadable."
+- Forward secrecy on the recipient side (a Double Ratchet). If asked: "each
+  message uses a fresh sender key, so a leaked sender key reveals nothing;
+  a leaked recipient key does, and fixing that is the Signal protocol."
 - Read receipts, typing indicators, file transfer, emoji picker.
 - Package managers. No vcpkg, no CMake, no Homebrew.
+
+## Privacy, in the order it is built
+
+1. **End-to-end encryption.** An Ed25519 key converts to an X25519 key, so
+   every contact link is also an encryption key. Each message is a sealed
+   box: the sender makes a throwaway X25519 keypair, agrees a secret with the
+   recipient's key, hashes it into an AEAD key and encrypts the text with
+   XChaCha20-Poly1305. The server never sees plaintext. Chatting with
+   yourself never leaves the machine.
+2. **Safety number and padding.** Both people see the same 20 digit number
+   derived from both public keys and can compare it out of band to catch a
+   swapped key. Plaintext is padded to a multiple of 64 bytes before
+   encryption so the server cannot tell "ok" from a paragraph.
+3. **Offline delivery.** The server keeps ciphertext for a recipient who is
+   offline, in memory, up to 100 messages per key, and sends it when they
+   log in. A server restart drops the queue. Acceptable only because of 1.
+4. **Passphrase.** The first run asks for a passphrase. Argon2id turns it
+   into a key that encrypts the identity's secret key and every message text
+   in `chat.db`. Later runs ask for it to unlock. Forget it and the history
+   and the identity are gone; that is the point.
 
 ## Programs
 
@@ -103,11 +126,12 @@ Max frame 64 KiB. Anything bigger or with an unknown type closes the socket.
 | 1    | HELLO     | C -> S    | `pubkey[32]`                                       |
 | 2    | CHALLENGE | S -> C    | `nonce[32]`                                        |
 | 3    | AUTH      | C -> S    | `sig[64]` = sign(nonce)                            |
-| 4    | MSG       | both      | `from[32] to[32] u64 timestamp_ms u32 len text[len] sig[64]` |
-| 5    | OK        | S -> C    | empty                                              |
+| 4    | MSG       | both      | `from[32] to[32] u64 timestamp_ms eph[32] nonce[24] mac[16] u32 len cipher[len] sig[64]` |
+| 5    | OK        | S -> C    | empty after login; `u8 how` after a MSG: 1 delivered, 2 stored |
 | 6    | ERROR     | S -> C    | `text`                                             |
 
-`MSG.sig` signs every payload byte before it: `from ‖ to ‖ timestamp ‖ len ‖ text`.
+`MSG.sig` signs every payload byte before it. `cipher` is the padded text
+sealed to the recipient's key with the throwaway key `eph`; see Privacy.
 
 Login:
 
@@ -120,37 +144,45 @@ S: OK                 (or ERROR + close)
 
 Sending: client sends MSG. Server checks `from` equals the logged-in key and
 the signature verifies. If `to` is online, the server forwards the payload
-unchanged and replies OK. If not, it replies `ERROR "offline"`. The client
-verifies the signature again on receipt and stores the message.
+unchanged and replies OK 1. If not, it stores the payload and replies OK 2,
+or `ERROR "mailbox full"`. The client verifies the signature again on
+receipt, opens the sealed box, and stores the message.
 
-Sending to yourself works and is the "Saved messages" chat. The server echoes
-it back; the client ignores the echo and stores the message when OK arrives.
+Messages to yourself are the "Saved messages" chat and never leave the
+machine.
 
 A key can be logged in once. A second login with the same key is refused.
 
 ## Storage (client only, `~/.socketchat/chat.db`, `--db path` to override)
 
 ```sql
-identity (pub BLOB, sec BLOB)                       -- one row
+identity (pub BLOB, sec BLOB)                       -- one row, sec encrypted
 contacts (pub BLOB PRIMARY KEY, nickname TEXT)
 messages (id INTEGER PRIMARY KEY, contact BLOB, incoming INT,
-          timestamp_ms INT, text TEXT)
-settings (key TEXT PRIMARY KEY, value TEXT)         -- nickname, dark, last_chat
+          timestamp_ms INT, text BLOB)              -- text encrypted
+settings (key TEXT PRIMARY KEY, value TEXT)         -- nickname, salt, dark, last_chat
 ```
 
-The server has no database and no identity. Restarting it loses nothing.
+Encrypted at rest means `nonce[24] mac[16] cipher`, keyed by Argon2id of the
+passphrase and `salt`. Nicknames, contacts and timestamps stay readable.
+
+The server has no database and no identity. Restarting it loses only the
+queue of undelivered messages.
 
 ## Client screens
 
-1. **Setup**: nickname and a Connect button. The server address is not
-   asked for; it is baked in at build time from `build/server.h`, which
-   `nob` generates once with `127.0.0.1:5050` and you edit for the VPS.
-   The nickname is remembered and the client logs in by itself next time.
-2. **Chats**: left sidebar lists You (saved messages) and contacts. Right side
-   shows the open chat and a one-line composer, Enter sends. Sidebar buttons:
-   Copy my link, Add contact, dark mode. Add contact asks for a link and a
-   nickname. A message from an unknown key adds that key as a contact.
-   The last open chat is reopened on the next login.
+1. **Setup**: first run asks for a nickname and a passphrase; later runs
+   ask for the passphrase to unlock. The server address is not asked for; it
+   is baked in at build time from `build/server.h`, which `nob` generates
+   once with `127.0.0.1:5050` and you edit for the VPS.
+2. **Chats**: opens right after unlock, online or not, and logs in in the
+   background. The sidebar header shows online, connecting, or offline with
+   a Retry button. Left sidebar lists You (saved messages) and contacts.
+   Right side shows the open chat, its safety number, and a one-line
+   composer, Enter sends. Sidebar buttons: Copy my link, Add contact, dark
+   mode. Add contact asks for a link and a nickname. A message from an
+   unknown key adds that key as a contact. The last open chat is reopened.
+   Reading history and writing to yourself work offline.
 
 Contact link format: `chat://` + 64 hex chars of the public key.
 
@@ -202,11 +234,12 @@ Borrowed from tsoding's code (see musializer `plug.c`, tatr `tatr.c`):
 
 - **frames**: encode two frames, parse both, partial input returns 0, bad
   length and bad type return -1.
-- **messages**: build a signed MSG, parse it, verify; flip a bit, verify fails.
+- **messages**: seal a text to a key, build a signed MSG, parse, verify,
+  open; flip a bit, verify fails; the wrong key cannot open it.
 - **links**: link round trip, whitespace tolerated, wrong prefix rejected.
 - **end_to_end**: a real server and two real clients in one process. Login,
-  deliver, self-chat echo, offline recipient, duplicate login refused, peer
-  disconnect noticed.
+  deliver and decrypt, store for an offline recipient and deliver on login,
+  duplicate login refused, peer disconnect noticed.
 
 ## Who owns what
 
