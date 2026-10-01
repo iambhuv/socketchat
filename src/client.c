@@ -29,7 +29,7 @@ typedef enum {
     CLIENT_EVENT_NONE,
     CLIENT_EVENT_CONNECTED,     // login finished
     CLIENT_EVENT_MESSAGE,       // .msg and .text are valid until the next client_poll
-    CLIENT_EVENT_SENT,          // the last message reached its recipient
+    CLIENT_EVENT_SENT,          // the server took the last message, see .stored
     CLIENT_EVENT_REJECTED,      // the server refused the last message, see .error
     CLIENT_EVENT_DISCONNECTED,  // the socket is closed, see .error
 } Client_Event_Kind;
@@ -39,6 +39,7 @@ typedef struct {
     Msg msg;
     String_View text;    // decrypted
     String_View error;
+    bool stored;         // SENT: kept on the server until they log in
 } Client_Event;
 
 static bool client_send(Client *c, Frame_Type type, const void *payload, uint32_t size)
@@ -130,7 +131,9 @@ static Client_Event client_handle(Client *c, const Identity *me, Frame *f)
     case CLIENT_READY: {
         if (f->type == FRAME_OK) {
             c->waiting_for_ok = false;
-            return client_event(CLIENT_EVENT_SENT, "");
+            Client_Event e = client_event(CLIENT_EVENT_SENT, "");
+            e.stored = f->size == 1 && f->payload[0] == 2;
+            return e;
         }
         if (f->type == FRAME_ERROR) {
             c->waiting_for_ok = false;

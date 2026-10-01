@@ -32,7 +32,7 @@ typedef enum {
     FRAME_CHALLENGE,   // S -> C   nonce[32]
     FRAME_AUTH,        // C -> S   sig[64] = sign(nonce)
     FRAME_MSG,         // both     from[32] to[32] u64 timestamp_ms eph[32] nonce[24] mac[16] u32 len cipher[len] sig[64]
-    FRAME_OK,          // S -> C   empty. Login worked, or the message was delivered.
+    FRAME_OK,          // S -> C   empty after AUTH; after MSG one byte: 1 delivered, 2 stored
     FRAME_ERROR,       // S -> C   text
     COUNT_FRAMES,
 } Frame_Type;

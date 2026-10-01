@@ -146,28 +146,40 @@ bool test_end_to_end(void)
 
     uint64_t ts;
     CHECK(client_send_text(&a, &alice, bob.pub, SVLIT("hello bob"), &ts));
-    CHECK(pump(&server, &a, &alice).kind == CLIENT_EVENT_SENT);
-    Client_Event e = pump(&server, &b, &bob);
+    Client_Event e = pump(&server, &a, &alice);
+    CHECK(e.kind == CLIENT_EVENT_SENT && !e.stored);
+    e = pump(&server, &b, &bob);
     CHECK(e.kind == CLIENT_EVENT_MESSAGE);
     CHECK(keys_equal(e.msg.from, alice.pub) && sv_eq(e.text, SVLIT("hello bob")));
     CHECK(e.msg.timestamp_ms == ts);
 
-    // Nobody home.
+    // Nobody home: the server keeps it, up to a limit.
     uint8_t nobody[KEY_SIZE] = {0};
+    for (int i = 0; i < MAILBOX_PER_KEY; ++i) {
+        CHECK(client_send_text(&a, &alice, nobody, SVLIT("anyone?"), &ts));
+        e = pump(&server, &a, &alice);
+        CHECK(e.kind == CLIENT_EVENT_SENT && e.stored);
+    }
     CHECK(client_send_text(&a, &alice, nobody, SVLIT("anyone?"), &ts));
     e = pump(&server, &a, &alice);
-    CHECK(e.kind == CLIENT_EVENT_REJECTED && sv_eq(e.error, SVLIT("offline")));
+    CHECK(e.kind == CLIENT_EVENT_REJECTED && sv_eq(e.error, SVLIT("mailbox full")));
 
     // Second login with the same key is refused.
     Client a2 = { .sock = NET_INVALID };
     CHECK(client_connect(&a2, "127.0.0.1", port, &alice));
     CHECK(pump(&server, &a2, &alice).kind == CLIENT_EVENT_DISCONNECTED);
 
-    // Bob leaves, alice's next message to him bounces.
+    // Bob leaves, alice's next message waits for him, and he gets it on login.
     client_close(&b);
     CHECK(server_step(&server, 50)); // let the server notice the closed socket
     CHECK(client_send_text(&a, &alice, bob.pub, SVLIT("still there?"), &ts));
-    CHECK(pump(&server, &a, &alice).kind == CLIENT_EVENT_REJECTED);
+    e = pump(&server, &a, &alice);
+    CHECK(e.kind == CLIENT_EVENT_SENT && e.stored);
+    CHECK(client_connect(&b, "127.0.0.1", port, &bob));
+    CHECK(pump(&server, &b, &bob).kind == CLIENT_EVENT_CONNECTED);
+    e = pump(&server, &b, &bob);
+    CHECK(e.kind == CLIENT_EVENT_MESSAGE && sv_eq(e.text, SVLIT("still there?")));
+    client_close(&b);
 
     client_close(&a);
     server_stop(&server);

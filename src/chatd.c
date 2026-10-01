@@ -15,6 +15,7 @@
 
 #define DEFAULT_PORT 5050
 #define MAX_PEERS    64
+#define MAILBOX_PER_KEY 100
 
 typedef enum {
     PEER_WAIT_HELLO,
@@ -30,11 +31,24 @@ typedef struct {
     String_Builder inbox;
 } Peer;
 
+// A message for someone who is offline. Ciphertext, so holding it is safe.
+typedef struct {
+    uint8_t to[KEY_SIZE];
+    String_Builder payload;
+} Stored;
+
+typedef struct {
+    Stored *items;
+    size_t count;
+    size_t capacity;
+} Mailbox;
+
 typedef struct {
     Net_Socket listener;
     Peer peers[MAX_PEERS];
     size_t peers_count;
     String_Builder scratch;
+    Mailbox mailbox;
 } Server;
 
 static bool peer_send(Server *s, Peer *p, Frame_Type type, const void *payload, uint32_t size)
@@ -69,6 +83,31 @@ static Peer *server_find(Server *s, const uint8_t pub[KEY_SIZE])
     return NULL;
 }
 
+static size_t mailbox_count(Server *s, const uint8_t to[KEY_SIZE])
+{
+    size_t n = 0;
+    da_foreach(Stored, m, &s->mailbox) n += keys_equal(m->to, to);
+    return n;
+}
+
+// Hands a freshly logged in peer everything that was waiting for them.
+static bool mailbox_deliver(Server *s, Peer *p)
+{
+    size_t kept = 0, sent = 0;
+    bool ok = true;
+    for (size_t i = 0; i < s->mailbox.count; ++i) {
+        Stored *m = &s->mailbox.items[i];
+        if (ok && keys_equal(m->to, p->pub)) {
+            ok = peer_send(s, p, FRAME_MSG, m->payload.items, (uint32_t)m->payload.count);
+            if (ok) { sb_free(m->payload); sent++; continue; }
+        }
+        s->mailbox.items[kept++] = *m;
+    }
+    s->mailbox.count = kept;
+    if (sent) nob_log(INFO, "%s received %zu stored message%s", key_short(p->pub), sent, sent == 1 ? "" : "s");
+    return ok;
+}
+
 // False means "disconnect this peer".
 static bool peer_handle(Server *s, Peer *p, Frame *f)
 {
@@ -88,7 +127,7 @@ static bool peer_handle(Server *s, Peer *p, Frame *f)
         if (!peer_send(s, p, FRAME_OK, NULL, 0)) return false;
         p->state = PEER_READY;
         nob_log(INFO, "%s logged in", key_short(p->pub));
-        return true;
+        return mailbox_deliver(s, p);
     }
     case PEER_READY: {
         if (f->type != FRAME_MSG) return peer_error(s, p, "expected MSG");
@@ -97,17 +136,21 @@ static bool peer_handle(Server *s, Peer *p, Frame *f)
         if (!keys_equal(msg.from, p->pub)) return peer_error(s, p, "MSG.from is not you");
         if (!signature_ok(msg.sig, msg.from, msg.signed_data, msg.signed_size)) return peer_error(s, p, "bad MSG signature");
         Peer *to = server_find(s, msg.to);
-        if (to == NULL) {
-            peer_send(s, p, FRAME_ERROR, "offline", 7);
+        if (to != NULL && peer_send(s, to, FRAME_MSG, f->payload, f->size)) {
+            nob_log(INFO, "%s -> %s (%u bytes)", key_short(msg.from), key_short(msg.to), f->size);
+            return peer_send(s, p, FRAME_OK, "\x01", 1);
+        }
+        // Offline, or gone and its socket will fail on the next poll. Keep it.
+        if (mailbox_count(s, msg.to) >= MAILBOX_PER_KEY) {
+            peer_send(s, p, FRAME_ERROR, "mailbox full", 12);
             return true;
         }
-        if (!peer_send(s, to, FRAME_MSG, f->payload, f->size)) {
-            // The recipient is gone. Its socket will fail on the next poll.
-            peer_send(s, p, FRAME_ERROR, "offline", 7);
-            return true;
-        }
-        nob_log(INFO, "%s -> %s (%u bytes)", key_short(msg.from), key_short(msg.to), f->size);
-        return peer_send(s, p, FRAME_OK, NULL, 0);
+        Stored m = {0};
+        memcpy(m.to, msg.to, KEY_SIZE);
+        sb_append_buf(&m.payload, f->payload, f->size);
+        da_append(&s->mailbox, m);
+        nob_log(INFO, "%s -> %s stored (%zu waiting)", key_short(msg.from), key_short(msg.to), s->mailbox.count);
+        return peer_send(s, p, FRAME_OK, "\x02", 1);
     }
     default:
         UNREACHABLE("Peer_State");
@@ -174,6 +217,8 @@ void server_stop(Server *s)
     while (s->peers_count > 0) server_drop(s, s->peers_count - 1, "server stopped");
     net_close(s->listener);
     sb_free(s->scratch);
+    da_foreach(Stored, m, &s->mailbox) sb_free(m->payload);
+    da_free(s->mailbox);
 }
 
 #ifndef CHATD_NO_MAIN

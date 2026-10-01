@@ -181,13 +181,14 @@ static void handle_events(Chat *c)
                 db_store_message(c->db, c->outgoing.to, false, c->outgoing.timestamp_ms,
                                  sv_from_cstr(c->outgoing.text));
                 c->outgoing.waiting = false;
-                c->send_status[0] = '\0';
+                snprintf(c->send_status, sizeof(c->send_status), "%s",
+                         e.stored ? "They are offline. The server will hand it over when they log in." : "");
                 if (c->chat_open && keys_equal(c->peer, c->outgoing.to)) reload_messages(c);
             }
             break;
         case CLIENT_EVENT_REJECTED:
             c->outgoing.waiting = false;
-            snprintf(c->send_status, sizeof(c->send_status), "Not delivered, they are %.*s", SV_Arg(e.error));
+            snprintf(c->send_status, sizeof(c->send_status), "Not delivered: %.*s", SV_Arg(e.error));
             break;
         case CLIENT_EVENT_DISCONNECTED:
             c->login_started = 0;
