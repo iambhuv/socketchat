@@ -75,8 +75,8 @@ static void onboarding_draw_heading(Rectangle card, const UiTheme *theme)
 {
     const Font title_font = ui_font_get_semibold();
     const Font body_font = ui_font_get();
-    const char *title = "Choose your username";
-    const char *subtitle = "Friends will use it to find you";
+    const char *title = "Create your chat profile";
+    const char *subtitle = "Choose a username and connect to your shared server";
     const float title_size = 30.0f;
     const Vector2 title_measure = MeasureTextEx(
         title_font,
@@ -111,6 +111,29 @@ static void onboarding_draw_heading(Rectangle card, const UiTheme *theme)
         theme->text_muted);
 }
 
+static bool onboarding_server_host_is_valid(const char *host)
+{
+    size_t index;
+
+    if (host == NULL || host[0] == '\0')
+    {
+        return false;
+    }
+    for (index = 0; host[index] != '\0'; ++index)
+    {
+        const char value = host[index];
+
+        if (!((value >= 'a' && value <= 'z') ||
+              (value >= 'A' && value <= 'Z') ||
+              (value >= '0' && value <= '9') ||
+              value == '.' || value == '-' || value == ':'))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 void onboarding_screen_init(OnboardingScreen *screen)
 {
     if (screen == NULL)
@@ -129,9 +152,10 @@ bool onboarding_screen_draw(OnboardingScreen *screen)
     const float screen_width = (float)GetScreenWidth();
     const float screen_height = (float)GetScreenHeight();
     const float card_width = ui_clamp(screen_width - 56.0f, 420.0f, 520.0f);
-    const float card_height = 430.0f;
+    const float card_height = 500.0f;
     Rectangle card;
     Rectangle username_input;
+    Rectangle server_input;
     Rectangle continue_button;
     bool continue_requested;
     bool can_submit;
@@ -160,9 +184,15 @@ bool onboarding_screen_draw(OnboardingScreen *screen)
         card.width - 84.0f,
         theme->control_height
     };
+    server_input = (Rectangle){
+        card.x + 42.0f,
+        card.y + 305.0f,
+        card.width - 84.0f,
+        theme->control_height
+    };
     continue_button = (Rectangle){
         card.x + 42.0f,
-        card.y + 321.0f,
+        card.y + 401.0f,
         card.width - 84.0f,
         theme->control_height
     };
@@ -192,6 +222,24 @@ bool onboarding_screen_draw(OnboardingScreen *screen)
             onboarding_screen_set_status(screen, UI_STATUS_OFFLINE, "Offline");
         }
     }
+    if (ui_text_input(
+            server_input,
+            "Shared server",
+            "192.168.1.20",
+            screen->server_host,
+            sizeof(screen->server_host),
+            UI_TEXT_INPUT_NORMAL,
+            screen->server_has_error,
+            &screen->server_input,
+            theme))
+    {
+        screen->server_has_error = false;
+
+        if (screen->status_kind == UI_STATUS_ERROR)
+        {
+            onboarding_screen_set_status(screen, UI_STATUS_OFFLINE, "Offline");
+        }
+    }
 
     can_submit = screen->status_kind != UI_STATUS_CONNECTING &&
                  screen->status_kind != UI_STATUS_CONNECTED;
@@ -215,11 +263,15 @@ bool onboarding_screen_draw(OnboardingScreen *screen)
             !protocol_username_is_valid(
                 screen->username,
                 strlen(screen->username));
+        screen->server_has_error =
+            !onboarding_server_host_is_valid(screen->server_host);
 
         onboarding_screen_set_status(
             screen,
-            screen->username_has_error ? UI_STATUS_ERROR : UI_STATUS_CONNECTING,
-            screen->username_has_error ? "Check username" : "Connecting");
+            (screen->username_has_error || screen->server_has_error)
+                ? UI_STATUS_ERROR : UI_STATUS_CONNECTING,
+            screen->username_has_error ? "Check username"
+                : (screen->server_has_error ? "Check server address" : "Connecting"));
     }
 
     /* Draw this last so a button click updates the badge in the same frame. */
@@ -229,7 +281,7 @@ bool onboarding_screen_draw(OnboardingScreen *screen)
         screen->status_kind,
         theme);
 
-    return continue_requested && !screen->username_has_error;
+    return continue_requested && !screen->username_has_error && !screen->server_has_error;
 }
 
 const char *onboarding_screen_username(const OnboardingScreen *screen)
@@ -244,6 +296,20 @@ void onboarding_screen_set_username(OnboardingScreen *screen, const char *userna
         return;
     }
     snprintf(screen->username, sizeof(screen->username), "%s", username);
+}
+
+const char *onboarding_screen_server_host(const OnboardingScreen *screen)
+{
+    return screen == NULL ? "" : screen->server_host;
+}
+
+void onboarding_screen_set_server_host(OnboardingScreen *screen, const char *host)
+{
+    if (screen == NULL || host == NULL)
+    {
+        return;
+    }
+    snprintf(screen->server_host, sizeof(screen->server_host), "%s", host);
 }
 
 void onboarding_screen_set_status(

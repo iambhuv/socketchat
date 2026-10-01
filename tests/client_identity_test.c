@@ -28,9 +28,13 @@ int main(void)
     unsigned char signature[crypto_sign_BYTES];
     unsigned char packet_id[PROTOCOL_PACKET_ID_SIZE] = { 0x42 };
     ClientChatMessage messages[2];
+    char server_host[CLIENT_DATABASE_SERVER_HOST_CAPACITY];
     uint32_t message_count;
     bool was_inserted;
     bool was_created;
+    bool server_host_was_found;
+    bool dark_mode;
+    bool dark_mode_was_found;
     bool dependencies_ready = false;
     int exit_code = 1;
 
@@ -57,6 +61,28 @@ int main(void)
     REQUIRE(client_identity_is_valid(&loaded_identity));
     REQUIRE(memcmp(&created_identity, &loaded_identity,
                    sizeof(created_identity)) == 0);
+
+    REQUIRE(client_database_load_server_host(
+                &database, server_host, sizeof(server_host),
+                &server_host_was_found) == CLIENT_DATABASE_OK);
+    REQUIRE(!server_host_was_found);
+    REQUIRE(client_database_save_server_host(&database, "192.168.1.20") ==
+            CLIENT_DATABASE_OK);
+    REQUIRE(client_database_load_server_host(
+                &database, server_host, sizeof(server_host),
+                &server_host_was_found) == CLIENT_DATABASE_OK);
+    REQUIRE(server_host_was_found);
+    REQUIRE(strcmp(server_host, "192.168.1.20") == 0);
+    REQUIRE(client_database_save_server_host(&database, "") ==
+            CLIENT_DATABASE_INVALID_ARGUMENT);
+    REQUIRE(client_database_load_dark_mode(&database, &dark_mode, &dark_mode_was_found) ==
+            CLIENT_DATABASE_OK);
+    REQUIRE(!dark_mode_was_found);
+    REQUIRE(client_database_save_dark_mode(&database, false) == CLIENT_DATABASE_OK);
+    REQUIRE(client_database_load_dark_mode(&database, &dark_mode, &dark_mode_was_found) ==
+            CLIENT_DATABASE_OK);
+    REQUIRE(dark_mode_was_found);
+    REQUIRE(!dark_mode);
 
     REQUIRE(crypto_sign_detached(
                 signature,
@@ -92,6 +118,15 @@ int main(void)
     REQUIRE(messages[0].direction == CLIENT_MESSAGE_INCOMING);
     REQUIRE(messages[0].sender_timestamp_unix_ms == 1234);
     REQUIRE(strcmp(messages[0].text, "saved message") == 0);
+    REQUIRE(client_database_load_server_host(
+                &database, server_host, sizeof(server_host),
+                &server_host_was_found) == CLIENT_DATABASE_OK);
+    REQUIRE(server_host_was_found);
+    REQUIRE(strcmp(server_host, "192.168.1.20") == 0);
+    REQUIRE(client_database_load_dark_mode(&database, &dark_mode, &dark_mode_was_found) ==
+            CLIENT_DATABASE_OK);
+    REQUIRE(dark_mode_was_found);
+    REQUIRE(!dark_mode);
 
     REQUIRE(sqlite3_exec(
                 database.connection,

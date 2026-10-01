@@ -24,6 +24,14 @@ static const char CLIENT_DATABASE_SCHEMA[] =
     "singleton INTEGER PRIMARY KEY CHECK (singleton = 1),"
     "username TEXT NOT NULL"
     ");"
+    "CREATE TABLE IF NOT EXISTS client_settings ("
+    "singleton INTEGER PRIMARY KEY CHECK (singleton = 1),"
+    "server_host TEXT NOT NULL"
+    ");"
+    "CREATE TABLE IF NOT EXISTS client_preferences ("
+    "singleton INTEGER PRIMARY KEY CHECK (singleton = 1),"
+    "dark_mode INTEGER NOT NULL CHECK (dark_mode IN (0, 1))"
+    ");"
     "CREATE TABLE IF NOT EXISTS messages ("
     "id INTEGER PRIMARY KEY AUTOINCREMENT,"
     "contact_public_key BLOB NOT NULL CHECK (length(contact_public_key) = 32),"
@@ -602,6 +610,139 @@ ClientDatabaseStatus client_database_load_account_username(
     }
     memcpy(username, stored_username, stored_length);
     username[stored_length] = '\0';
+    *was_found = true;
+    sqlite3_finalize(statement);
+    return CLIENT_DATABASE_OK;
+}
+
+ClientDatabaseStatus client_database_save_server_host(
+    ClientDatabase *database, const char *host)
+{
+    sqlite3_stmt *statement = NULL;
+    int result;
+    size_t host_length;
+
+    if (database == NULL || database->connection == NULL || host == NULL)
+    {
+        return CLIENT_DATABASE_INVALID_ARGUMENT;
+    }
+    host_length = strlen(host);
+    if (host_length == 0 || host_length >= CLIENT_DATABASE_SERVER_HOST_CAPACITY)
+    {
+        return CLIENT_DATABASE_INVALID_ARGUMENT;
+    }
+    if (sqlite3_prepare_v2(database->connection,
+            "INSERT INTO client_settings (singleton, server_host) VALUES (1, ?) "
+            "ON CONFLICT(singleton) DO UPDATE SET server_host = excluded.server_host;",
+            -1, &statement, NULL) != SQLITE_OK ||
+        sqlite3_bind_text(statement, 1, host, -1, SQLITE_TRANSIENT) != SQLITE_OK)
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_WRITE_FAILED;
+    }
+    result = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    return result == SQLITE_DONE ? CLIENT_DATABASE_OK : CLIENT_DATABASE_WRITE_FAILED;
+}
+
+ClientDatabaseStatus client_database_load_server_host(
+    ClientDatabase *database, char *host, size_t host_capacity, bool *was_found)
+{
+    sqlite3_stmt *statement = NULL;
+    const unsigned char *stored_host;
+    int result;
+    size_t stored_length;
+
+    if (database == NULL || database->connection == NULL || host == NULL ||
+        host_capacity == 0 || was_found == NULL)
+    {
+        return CLIENT_DATABASE_INVALID_ARGUMENT;
+    }
+    *was_found = false;
+    host[0] = '\0';
+    if (sqlite3_prepare_v2(database->connection,
+            "SELECT server_host FROM client_settings WHERE singleton = 1;", -1,
+            &statement, NULL) != SQLITE_OK)
+    {
+        return CLIENT_DATABASE_READ_FAILED;
+    }
+    result = sqlite3_step(statement);
+    if (result == SQLITE_DONE)
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_OK;
+    }
+    stored_host = sqlite3_column_text(statement, 0);
+    stored_length = (size_t)sqlite3_column_bytes(statement, 0);
+    if (result != SQLITE_ROW || stored_host == NULL || stored_length == 0 ||
+        stored_length + 1u > host_capacity)
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_READ_FAILED;
+    }
+    memcpy(host, stored_host, stored_length);
+    host[stored_length] = '\0';
+    *was_found = true;
+    sqlite3_finalize(statement);
+    return CLIENT_DATABASE_OK;
+}
+
+ClientDatabaseStatus client_database_save_dark_mode(
+    ClientDatabase *database, bool enabled)
+{
+    sqlite3_stmt *statement = NULL;
+    int result;
+
+    if (database == NULL || database->connection == NULL)
+    {
+        return CLIENT_DATABASE_INVALID_ARGUMENT;
+    }
+    if (sqlite3_prepare_v2(database->connection,
+            "INSERT INTO client_preferences (singleton, dark_mode) VALUES (1, ?) "
+            "ON CONFLICT(singleton) DO UPDATE SET dark_mode = excluded.dark_mode;",
+            -1, &statement, NULL) != SQLITE_OK ||
+        sqlite3_bind_int(statement, 1, enabled ? 1 : 0) != SQLITE_OK)
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_WRITE_FAILED;
+    }
+    result = sqlite3_step(statement);
+    sqlite3_finalize(statement);
+    return result == SQLITE_DONE ? CLIENT_DATABASE_OK : CLIENT_DATABASE_WRITE_FAILED;
+}
+
+ClientDatabaseStatus client_database_load_dark_mode(
+    ClientDatabase *database, bool *enabled, bool *was_found)
+{
+    sqlite3_stmt *statement = NULL;
+    int result;
+    int stored_value;
+
+    if (database == NULL || database->connection == NULL || enabled == NULL ||
+        was_found == NULL)
+    {
+        return CLIENT_DATABASE_INVALID_ARGUMENT;
+    }
+    *was_found = false;
+    if (sqlite3_prepare_v2(database->connection,
+            "SELECT dark_mode FROM client_preferences WHERE singleton = 1;", -1,
+            &statement, NULL) != SQLITE_OK)
+    {
+        return CLIENT_DATABASE_READ_FAILED;
+    }
+    result = sqlite3_step(statement);
+    if (result == SQLITE_DONE)
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_OK;
+    }
+    stored_value = sqlite3_column_int(statement, 0);
+    if (result != SQLITE_ROW || (stored_value != 0 && stored_value != 1))
+    {
+        sqlite3_finalize(statement);
+        return CLIENT_DATABASE_READ_FAILED;
+    }
+    *enabled = stored_value != 0;
     *was_found = true;
     sqlite3_finalize(statement);
     return CLIENT_DATABASE_OK;

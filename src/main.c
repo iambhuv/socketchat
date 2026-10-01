@@ -7,6 +7,7 @@
 #include "core/app_config.h"
 #include "core/dependencies.h"
 #include "ui/ui_font.h"
+#include "ui/ui_theme.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -21,9 +22,13 @@ int main(int argc, char *argv[])
     ClientIdentity identity;
     bool identity_was_created;
     bool account_was_found = false;
+    bool server_host_was_found = false;
+    bool dark_mode_was_found = false;
+    bool saved_dark_mode = ui_theme_is_dark_mode();
     bool reconnect_pending;
     bool chat_open = false;
     const char *client_database_path = APP_CLIENT_DATABASE_PATH;
+    char server_host[CLIENT_DATABASE_SERVER_HOST_CAPACITY] = APP_SERVER_HOST;
     OnboardingScreen onboarding_screen;
 
     if (argc == 3 && strcmp(argv[1], "--database") == 0 && argv[2][0] != '\0')
@@ -75,6 +80,21 @@ int main(int argc, char *argv[])
             /* Applied after the Raylib UI state is initialized below. */
         }
     }
+    if (database_status == CLIENT_DATABASE_OK)
+    {
+        database_status = client_database_load_server_host(
+            &database,
+            server_host,
+            sizeof(server_host),
+            &server_host_was_found);
+    }
+    if (database_status == CLIENT_DATABASE_OK)
+    {
+        database_status = client_database_load_dark_mode(
+            &database,
+            &saved_dark_mode,
+            &dark_mode_was_found);
+    }
 
     if (database_status != CLIENT_DATABASE_OK)
     {
@@ -105,8 +125,14 @@ int main(int argc, char *argv[])
 
     SetWindowMinSize(640, 540);
     SetTargetFPS(60);
+    if (dark_mode_was_found)
+    {
+        ui_theme_set_dark_mode(saved_dark_mode);
+    }
     ui_font_load();
     onboarding_screen_init(&onboarding_screen);
+    onboarding_screen_set_server_host(&onboarding_screen,
+                                      server_host_was_found ? server_host : APP_SERVER_HOST);
     reconnect_pending = account_was_found;
     if (account_was_found)
     {
@@ -141,12 +167,21 @@ int main(int argc, char *argv[])
         }
         EndDrawing();
 
+        if (chat_open && ui_theme_is_dark_mode() != saved_dark_mode)
+        {
+            if (client_database_save_dark_mode(
+                    &database, ui_theme_is_dark_mode()) == CLIENT_DATABASE_OK)
+            {
+                saved_dark_mode = ui_theme_is_dark_mode();
+            }
+        }
+
         if (account_requested)
         {
             ClientConnectionStatus connection_status =
                 client_connection_connect(
                     &connection,
-                    APP_SERVER_HOST,
+                    onboarding_screen_server_host(&onboarding_screen),
                     APP_SERVER_PORT,
                     &identity);
 
@@ -159,7 +194,7 @@ int main(int argc, char *argv[])
                 connection_status = client_connection_finish_handshake(
                     &connection,
                     &database,
-                    APP_SERVER_HOST,
+                    onboarding_screen_server_host(&onboarding_screen),
                     APP_SERVER_PORT,
                     &identity);
             }
@@ -172,6 +207,8 @@ int main(int argc, char *argv[])
                     "Connected");
                 (void)client_database_save_account_username(
                     &database, onboarding_screen_username(&onboarding_screen));
+                (void)client_database_save_server_host(
+                    &database, onboarding_screen_server_host(&onboarding_screen));
                 chat_open = true;
                 printf("Connected with a verified server and authenticated identity.\n");
             }
