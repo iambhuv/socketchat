@@ -63,9 +63,10 @@ The included `vcpkg.json` tells vcpkg to install libsodium and SQLite during the
 CMake configure step. When using a single-configuration generator such as
 MinGW Makefiles, the program is created at `build\socket_chat.exe` instead.
 
-The GUI does not ask users for a server address. The development address and
-port are kept together in `src/core/app_config.h`; change them there when the
-server is deployed somewhere else.
+The GUI starts with `127.0.0.1` for local development. On the sign-in screen,
+you can replace it with a shared server's LAN address; the app remembers the
+last successful address for that profile. The default port is 5050 and is kept
+in `src/core/app_config.h`.
 
 On first launch, the client creates `socket_chat.db` and stores a new Ed25519
 identity keypair in it. Later launches load the same identity, so the user's
@@ -81,6 +82,23 @@ For a local two-client demo, start each copy with its own database file:
 Use **Copy my link** in one client, then use **Add contact** in the other. Both
 clients must be connected to the same server before a direct message can be
 delivered.
+
+### Same-Wi-Fi two-person demo
+
+1. Choose one laptop to host the server and start `socket_chat_server.exe`.
+2. On that laptop, find its Wi-Fi IPv4 address with:
+
+   ```powershell
+   Get-NetIPAddress -InterfaceAlias "Wi-Fi" -AddressFamily IPv4 |
+     Where-Object {$_.IPAddress -notlike "169.254.*"}
+   ```
+
+3. On both clients, enter that address in the **Shared server** field on the
+   sign-in screen, for example `192.168.1.20`.
+4. If Windows asks about firewall access for the server, allow it on **Private
+   networks**. Both laptops must be on the same Wi-Fi network.
+5. Create each account, copy one contact link, add it in the other client, and
+   send a message while both clients are online.
 
 ## Tests
 

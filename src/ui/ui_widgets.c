@@ -294,13 +294,8 @@ void ui_draw_panel(Rectangle bounds, const UiTheme *theme)
     const float roundness = ui_roundness(bounds, theme->panel_radius);
     Rectangle shadow = bounds;
 
-    shadow.y += 10.0f;
+    shadow.y += 5.0f;
     DrawRectangleRounded(shadow, roundness, 16, theme->shadow);
-
-    shadow.y -= 5.0f;
-    shadow.x += 4.0f;
-    shadow.width -= 8.0f;
-    DrawRectangleRounded(shadow, roundness, 16, Fade(theme->shadow, 0.45f));
 
     DrawRectangleRounded(bounds, roundness, 16, theme->surface);
     DrawRectangleRoundedLinesEx(
@@ -308,7 +303,7 @@ void ui_draw_panel(Rectangle bounds, const UiTheme *theme)
         roundness,
         16,
         1.0f,
-        Fade(theme->border, 0.65f));
+        Fade(theme->border, 0.42f));
 }
 
 bool ui_button(
@@ -346,7 +341,7 @@ bool ui_button(
         bounds,
         1.0f - state->press_amount * 0.025f);
     shadow = animated_bounds;
-    shadow.y += ui_lerp(5.0f, 2.0f, state->press_amount);
+    shadow.y += ui_lerp(4.0f, 1.0f, state->press_amount);
     fill = ui_color_lerp(
         theme->primary,
         theme->primary_hovered,
@@ -361,7 +356,7 @@ bool ui_button(
         shadow,
         ui_roundness(shadow, theme->control_radius),
         14,
-        Fade(theme->primary, enabled ? 0.20f : 0.08f));
+        Fade(theme->primary, enabled ? 0.14f : 0.06f));
     DrawRectangleRounded(
         animated_bounds,
         ui_roundness(animated_bounds, theme->control_radius),

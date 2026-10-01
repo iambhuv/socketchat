@@ -35,6 +35,7 @@ typedef struct ClientContact
 } ClientContact;
 
 #define CLIENT_DATABASE_MESSAGE_TEXT_CAPACITY 512u
+#define CLIENT_DATABASE_SERVER_HOST_CAPACITY 128u
 
 typedef enum ClientMessageDirection
 {
@@ -115,6 +116,24 @@ ClientDatabaseStatus client_database_load_account_username(
     ClientDatabase *database,
     char *username,
     size_t username_capacity,
+    bool *was_found);
+
+/* Stores the address of the server selected on the onboarding screen. */
+ClientDatabaseStatus client_database_save_server_host(
+    ClientDatabase *database,
+    const char *host);
+ClientDatabaseStatus client_database_load_server_host(
+    ClientDatabase *database,
+    char *host,
+    size_t host_capacity,
+    bool *was_found);
+
+ClientDatabaseStatus client_database_save_dark_mode(
+    ClientDatabase *database,
+    bool enabled);
+ClientDatabaseStatus client_database_load_dark_mode(
+    ClientDatabase *database,
+    bool *enabled,
     bool *was_found);
 
 const char *client_database_status_string(ClientDatabaseStatus status);
