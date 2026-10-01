@@ -286,7 +286,9 @@ static bool ui_edit(char *buf, size_t cap, Text_State *st)
 }
 
 // Single line text box. Returns true when Enter is pressed while focused.
-bool ui_input_id(uint64_t id, Rectangle r, const char *placeholder, char *buf, size_t cap, Text_State *st)
+// With `secret` every character is drawn as a star.
+bool ui_input_id(uint64_t id, Rectangle r, const char *placeholder, char *buf, size_t cap,
+                 Text_State *st, bool secret)
 {
     const Theme *t = theme();
     const float pad = 12, size = UI_BODY;
@@ -308,13 +310,27 @@ bool ui_input_id(uint64_t id, Rectangle r, const char *placeholder, char *buf, s
     ui_panel(r, UI_RADIUS, t->surface, ui_lerp(t->border, t->accent, focus));
     if (focus > 0.01f) DrawRectangleRoundedLinesEx(r, ui_roundness(r, UI_RADIUS), 10, 1, Fade(t->accent, focus));
 
+    // What gets drawn: the buffer, or one star per character.
+    char *shown = buf;
+    if (secret) {
+        shown = temp_alloc(strlen(buf) + 1);
+        size_t n = 0;
+        for (size_t i = 0; buf[i]; i = utf8_next(buf, i)) shown[n++] = '*';
+        shown[n] = '\0';
+    }
+    size_t shown_cursor = st->cursor;
+    if (secret) {
+        shown_cursor = 0;
+        for (size_t i = 0; i < st->cursor && buf[i]; i = utf8_next(buf, i)) shown_cursor++;
+    }
+
     // Keep the caret in view.
-    char saved = buf[st->cursor];
-    buf[st->cursor] = '\0';
-    float caret_x = ui_measure(buf, size, false).x;
-    buf[st->cursor] = saved;
+    char saved = shown[shown_cursor];
+    shown[shown_cursor] = '\0';
+    float caret_x = ui_measure(shown, size, false).x;
+    shown[shown_cursor] = saved;
     float avail = r.width - pad*2;
-    float total = ui_measure(buf, size, false).x;
+    float total = ui_measure(shown, size, false).x;
     if (caret_x - st->scroll > avail) st->scroll = caret_x - avail;
     if (caret_x < st->scroll) st->scroll = caret_x;
     float max_scroll = total > avail ? total - avail : 0;
@@ -326,7 +342,7 @@ bool ui_input_id(uint64_t id, Rectangle r, const char *placeholder, char *buf, s
     if (buf[0] == '\0' && !focused) {
         ui_text(placeholder, r.x + pad, text_y, size, t->muted, false);
     } else {
-        ui_text(buf, r.x + pad - st->scroll, text_y, size, t->text, false);
+        ui_text(shown, r.x + pad - st->scroll, text_y, size, t->text, false);
     }
     if (focused && fmod(GetTime() - st->blink, 1.0) < 0.55) {
         DrawRectangle((int)(r.x + pad + caret_x - st->scroll), (int)(text_y - 1), 1, (int)size + 3, t->text);
@@ -335,7 +351,8 @@ bool ui_input_id(uint64_t id, Rectangle r, const char *placeholder, char *buf, s
     return submitted;
 }
 
-#define ui_input(r, placeholder, buf, st) ui_input_id(UI_ID(0), (r), (placeholder), (buf), sizeof(buf), (st))
+#define ui_input(r, placeholder, buf, st)  ui_input_id(UI_ID(0), (r), (placeholder), (buf), sizeof(buf), (st), false)
+#define ui_secret(r, placeholder, buf, st) ui_input_id(UI_ID(0), (r), (placeholder), (buf), sizeof(buf), (st), true)
 
 // Draws text wrapped at max_width, or only measures it when draw is false.
 // Returns the number of lines. Breaks at spaces, and inside words that are

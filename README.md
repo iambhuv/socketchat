@@ -38,7 +38,9 @@ Change it to the server's address (`192.168.1.20` or `host:port`), run
 ## Run the demo
 
 1. Start the server on one machine: `./build/chatd` (port 5050 by default).
-2. Start the client on two machines: `./build/chat`. Pick a nickname.
+2. Start the client on two machines: `./build/chat`. Pick a nickname and a
+   passphrase. The passphrase encrypts your identity and history on disk and
+   there is no reset, so do not forget it.
 3. In one client press **Copy my link**. In the other press **Add contact**,
    paste it, give it a name.
 4. Chat. Messages are kept in `~/.socketchat/chat.db`; the server keeps nothing.

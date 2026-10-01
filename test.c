@@ -103,6 +103,31 @@ bool test_padding_and_safety(void)
     return true;
 }
 
+bool test_passphrase(void)
+{
+    uint8_t salt[SALT_SIZE], other_salt[SALT_SIZE], key[32], again[32], other[32];
+    CHECK(random_bytes(salt, SALT_SIZE) && random_bytes(other_salt, SALT_SIZE));
+    CHECK(passphrase_key(key, SVLIT("correct horse"), salt));
+    CHECK(passphrase_key(again, SVLIT("correct horse"), salt));
+    CHECK(memcmp(key, again, 32) == 0);
+    CHECK(passphrase_key(other, SVLIT("correct horse"), other_salt));
+    CHECK(memcmp(key, other, 32) != 0);
+    CHECK(passphrase_key(other, SVLIT("wrong horse"), salt));
+    CHECK(memcmp(key, other, 32) != 0);
+
+    String_Builder locked = {0}, plain = {0};
+    CHECK(lock_bytes(&locked, key, (const uint8_t *)"secret note", 11));
+    CHECK(locked.count == 11 + LOCKED_OVERHEAD);
+    CHECK(unlock_bytes(&plain, key, (uint8_t *)locked.items, locked.count));
+    CHECK(sv_eq(sb_to_sv(plain), SVLIT("secret note")));
+    plain.count = 0;
+    CHECK(!unlock_bytes(&plain, other, (uint8_t *)locked.items, locked.count));
+    CHECK(!unlock_bytes(&plain, key, (uint8_t *)locked.items, 5));
+    sb_free(locked);
+    sb_free(plain);
+    return true;
+}
+
 bool test_links(void)
 {
     Identity id;
@@ -196,6 +221,7 @@ int main(void)
         { "messages",   test_messages },
         { "links",      test_links },
         { "padding",    test_padding_and_safety },
+        { "passphrase", test_passphrase },
         { "end_to_end", test_end_to_end },
     };
     size_t failed = 0;

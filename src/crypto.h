@@ -75,6 +75,53 @@ bool keys_equal(const uint8_t a[KEY_SIZE], const uint8_t b[KEY_SIZE])
     return memcmp(a, b, KEY_SIZE) == 0;
 }
 
+// Passphrase to key with Argon2id, 32 MiB and 3 passes: slow enough to make
+// guessing expensive, fast enough to not notice on a laptop.
+#define SALT_SIZE 16
+
+bool passphrase_key(uint8_t key[32], String_View passphrase, const uint8_t salt[SALT_SIZE])
+{
+    crypto_argon2_config config = { CRYPTO_ARGON2_ID, 32*1024, 3, 1 };
+    void *work = malloc((size_t)config.nb_blocks*1024);
+    if (!work) {
+        nob_log(ERROR, "Could not allocate memory for Argon2");
+        return false;
+    }
+    crypto_argon2_inputs inputs = {
+        (const uint8_t *)passphrase.data, salt, (uint32_t)passphrase.count, SALT_SIZE,
+    };
+    crypto_argon2(key, 32, work, config, inputs, crypto_argon2_no_extras);
+    free(work);
+    return true;
+}
+
+// Encryption at rest: nonce[24] mac[16] cipher, appended to `out`.
+#define LOCKED_OVERHEAD (BOX_NONCE_SIZE + MAC_SIZE)
+
+bool lock_bytes(String_Builder *out, const uint8_t key[32], const uint8_t *data, size_t size)
+{
+    uint8_t nonce[BOX_NONCE_SIZE], mac[MAC_SIZE];
+    if (!random_bytes(nonce, sizeof(nonce))) return false;
+    da_reserve(out, out->count + LOCKED_OVERHEAD + size);
+    uint8_t *cipher = (uint8_t *)out->items + out->count + LOCKED_OVERHEAD;
+    crypto_aead_lock(cipher, mac, key, nonce, NULL, 0, data, size);
+    sb_append_buf(out, nonce, sizeof(nonce));
+    sb_append_buf(out, mac, sizeof(mac));
+    out->count += size;
+    return true;
+}
+
+bool unlock_bytes(String_Builder *out, const uint8_t key[32], const uint8_t *blob, size_t size)
+{
+    if (size < LOCKED_OVERHEAD) return false;
+    size_t n = size - LOCKED_OVERHEAD;
+    da_reserve(out, out->count + n);
+    int r = crypto_aead_unlock((uint8_t *)out->items + out->count, blob + BOX_NONCE_SIZE, key, blob,
+                               NULL, 0, blob + LOCKED_OVERHEAD, n);
+    if (r == 0) out->count += n;
+    return r == 0;
+}
+
 // Padding, so the server cannot tell "ok" from a paragraph: the text, one
 // 0x80 byte, then zeros up to a multiple of PAD_BLOCK. ISO/IEC 7816-4.
 #define PAD_BLOCK 64

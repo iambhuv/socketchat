@@ -25,22 +25,28 @@
 #define HEADER_HEIGHT   64.0f
 
 typedef enum {
-    SCREEN_SETUP,
+    SCREEN_SETUP,    // first run: nickname and passphrase
+    SCREEN_UNLOCK,   // every later run: passphrase
     SCREEN_CHATS,
 } Screen;
 
 typedef struct {
     sqlite3 *db;
     Identity me;
+    uint8_t key[32];            // from the passphrase, encrypts what is on disk
+    uint8_t salt[SALT_SIZE];
     Client client;
     Screen screen;
+
+    // Setup and unlock screens
+    char passphrase[64], repeat[64];
+    Text_State passphrase_st, repeat_st;
 
     // Login
     char nickname[32];
     Text_State nickname_st;
     double login_started;       // 0 when not logging in
-    bool auto_login;            // try on the first frame when a nickname is saved
-    char status[128];           // why we are offline, or "Pick a nickname first"
+    char status[128];           // why we are offline, or what is wrong with the form
     bool status_bad;
 
     // Chats screen
@@ -99,7 +105,7 @@ static const char *clock_text(uint64_t timestamp_ms)
 
 static void reload_messages(Chat *c)
 {
-    if (c->chat_open) db_messages(c->db, c->peer, &c->messages);
+    if (c->chat_open) db_messages(c->db, c->key, c->peer, &c->messages);
 }
 
 static void open_chat(Chat *c, const uint8_t pub[KEY_SIZE])
@@ -128,6 +134,10 @@ static void restore_last_chat(Chat *c)
 
 static void enter_chats(Chat *c)
 {
+    crypto_wipe(c->passphrase, sizeof(c->passphrase));
+    crypto_wipe(c->repeat, sizeof(c->repeat));
+    if (c->nickname[0] == '\0') snprintf(c->nickname, sizeof(c->nickname), "me");
+    nob_log(INFO, "Identity %s", key_short(c->me.pub));
     c->screen = SCREEN_CHATS;
     db_contacts(c->db, &c->contacts);
     restore_last_chat(c);
@@ -171,14 +181,14 @@ static void handle_events(Chat *c)
                 db_add_contact(c->db, e.msg.from, key_short(e.msg.from));
                 db_contacts(c->db, &c->contacts);
             }
-            db_store_message(c->db, e.msg.from, true, e.msg.timestamp_ms, e.text);
+            db_store_message(c->db, c->key, e.msg.from, true, e.msg.timestamp_ms, e.text);
             if (c->chat_open && keys_equal(c->peer, e.msg.from)) reload_messages(c);
             else toast(c, temp_sprintf("Message from %s", contact_name(c, e.msg.from)));
             break;
         }
         case CLIENT_EVENT_SENT:
             if (c->outgoing.waiting) {
-                db_store_message(c->db, c->outgoing.to, false, c->outgoing.timestamp_ms,
+                db_store_message(c->db, c->key, c->outgoing.to, false, c->outgoing.timestamp_ms,
                                  sv_from_cstr(c->outgoing.text));
                 c->outgoing.waiting = false;
                 snprintf(c->send_status, sizeof(c->send_status), "%s",
@@ -209,7 +219,7 @@ static void send_draft(Chat *c)
     if (text.count == 0 || c->outgoing.waiting) return;
     if (keys_equal(c->peer, c->me.pub)) {
         // Notes to yourself never leave the machine.
-        db_store_message(c->db, c->peer, false, (uint64_t)time(NULL)*1000, text);
+        db_store_message(c->db, c->key, c->peer, false, (uint64_t)time(NULL)*1000, text);
         reload_messages(c);
         c->draft[0] = '\0';
         c->draft_st.cursor = 0;
@@ -243,27 +253,52 @@ static void draw_toast(Chat *c)
     ui_text_centered(c->toast, r, UI_SMALL, Fade(t->bg, alpha), true);
 }
 
-static void setup_screen(Chat *c)
+// The card both login screens sit in. Returns where the form starts.
+static Vector2 login_card(Chat *c, float height, const char *title, const char *subtitle)
 {
     const Theme *t = theme();
     float w = GetScreenWidth(), h = GetScreenHeight();
-    Rectangle card = { (w - 400)/2, (h - 360)/2, 400, 360 };
+    Rectangle card = { (w - 400)/2, (h - height)/2, 400, height };
     ui_panel(card, 12, t->surface, t->border);
-
     float x = card.x + 32, y = card.y + 32;
     ui_avatar((Vector2){ x + 20, y + 20 }, 20, c->nickname[0] ? c->nickname : "S", true);
-    ui_text("Socket Chat", x + 56, y + 2, UI_TITLE, t->text, true);
-    ui_text(temp_sprintf("Server %s", SERVER), x + 56, y + 32, UI_SMALL, t->muted, false);
+    ui_text(title, x + 56, y + 2, UI_TITLE, t->text, true);
+    ui_text(subtitle, x + 56, y + 32, UI_SMALL, t->muted, false);
+    ui_text(temp_sprintf("build %s", GIT_HASH), 16, h - 28, UI_CAPTION, t->muted, false);
+    return (Vector2){ x, y + 80 };
+}
 
-    y += 88;
+static void login_status(Chat *c, float x, float y)
+{
+    if (c->status[0]) ui_text(c->status, x, y, UI_SMALL, c->status_bad ? theme()->err : theme()->muted, false);
+}
+
+// First run: pick a nickname and a passphrase, make the identity.
+static void setup_screen(Chat *c)
+{
+    const Theme *t = theme();
+    Vector2 at = login_card(c, 468, "Socket Chat", temp_sprintf("Server %s", SERVER));
+    float x = at.x, y = at.y, width = 400 - 64;
+
     ui_text("Nickname", x, y, UI_SMALL, t->muted, true);
-    Rectangle nick = { x, y + 24, card.width - 64, UI_CONTROL };
-    bool submit = ui_input(nick, "How your friends know you", c->nickname, &c->nickname_st);
+    bool submit = ui_input(((Rectangle){ x, y + 22, width, UI_CONTROL }), "How your friends know you", c->nickname, &c->nickname_st);
+    y += 78;
+    ui_text("Passphrase", x, y, UI_SMALL, t->muted, true);
+    submit = ui_secret(((Rectangle){ x, y + 22, width, UI_CONTROL }), "Locks your messages on this computer", c->passphrase, &c->passphrase_st) || submit;
+    y += 78;
+    ui_text("Repeat it. There is no reset.", x, y, UI_SMALL, t->muted, true);
+    submit = ui_secret(((Rectangle){ x, y + 22, width, UI_CONTROL }), "", c->repeat, &c->repeat_st) || submit;
+    y += 86;
 
-    Rectangle btn = { x, nick.y + nick.height + 24, card.width - 64, UI_CONTROL };
+    Rectangle btn = { x, y, width, UI_CONTROL };
     if (ui_button(btn, "Get started", true) || submit) {
         if (sv_trim(sv_from_cstr(c->nickname)).count == 0) {
             set_status(c, true, "Pick a nickname first");
+        } else if (strcmp(c->passphrase, c->repeat) != 0) {
+            set_status(c, true, "The passphrases do not match");
+        } else if (!passphrase_key(c->key, sv_from_cstr(c->passphrase), c->salt) ||
+                   !db_create_identity(c->db, c->key, &c->me)) {
+            set_status(c, true, "Could not create your identity, see the log");
         } else {
             db_set(c->db, "nickname", c->nickname);
             c->status[0] = '\0';
@@ -271,9 +306,39 @@ static void setup_screen(Chat *c)
             start_login(c);
         }
     }
-    if (c->status[0]) ui_text(c->status, x, btn.y + btn.height + 16, UI_SMALL, t->err, false);
+    login_status(c, x, btn.y + btn.height + 16);
+}
 
-    ui_text(temp_sprintf("build %s", GIT_HASH), 16, h - 28, UI_CAPTION, t->muted, false);
+// Every later run: the passphrase unlocks the identity and the history.
+static void unlock_screen(Chat *c)
+{
+    const Theme *t = theme();
+    Vector2 at = login_card(c, 300, "Welcome back", temp_sprintf("%s on %s", c->nickname, SERVER));
+    float x = at.x, y = at.y, width = 400 - 64;
+
+    ui_text("Passphrase", x, y, UI_SMALL, t->muted, true);
+    bool submit = ui_secret(((Rectangle){ x, y + 22, width, UI_CONTROL }), "", c->passphrase, &c->passphrase_st);
+    y += 86;
+    Rectangle btn = { x, y, width, UI_CONTROL };
+    if (ui_button(btn, "Unlock", true) || submit) {
+        if (!passphrase_key(c->key, sv_from_cstr(c->passphrase), c->salt)) {
+            set_status(c, true, "Could not derive the key, see the log");
+        } else switch (db_load_identity(c->db, c->key, &c->me)) {
+        case DB_IDENTITY_OK:
+            c->status[0] = '\0';
+            enter_chats(c);
+            start_login(c);
+            break;
+        case DB_IDENTITY_WRONG_KEY:
+            set_status(c, true, "Wrong passphrase");
+            break;
+        case DB_IDENTITY_ERROR:
+        default:
+            set_status(c, true, "The database cannot be read, see the log");
+            break;
+        }
+    }
+    login_status(c, x, btn.y + btn.height + 16);
 }
 
 static void add_contact_dialog(Chat *c)
@@ -483,14 +548,13 @@ int main(int argc, char **argv)
     Chat c = { .client = { .sock = NET_INVALID } };
     if (!net_init()) return 1;
     if (!db_open(&c.db, db_path)) return 1;
-    if (!db_identity(c.db, &c.me)) return 1;
+    if (!db_salt(c.db, c.salt)) return 1;
     db_get(c.db, "nickname", c.nickname, sizeof(c.nickname));
     char dark[8] = "0";
     db_get(c.db, "dark", dark, sizeof(dark));
     ui.dark = dark[0] == '1';
-    c.auto_login = c.nickname[0] != '\0';
-    if (c.auto_login) enter_chats(&c);
-    nob_log(INFO, "Identity %s, database %s, server %s", key_short(c.me.pub), db_path, SERVER);
+    c.screen = db_has_identity(c.db) ? SCREEN_UNLOCK : SCREEN_SETUP;
+    nob_log(INFO, "Database %s, server %s", db_path, SERVER);
 
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT);
     InitWindow(960, 600, "Socket Chat");
@@ -501,17 +565,16 @@ int main(int argc, char **argv)
 
     while (!WindowShouldClose()) {
         temp_reset();
-        if (c.auto_login) {
-            c.auto_login = false;
-            start_login(&c);
-        }
         handle_events(&c);
 
         BeginDrawing();
         ui_begin();
         ClearBackground(theme()->bg);
-        if (c.screen == SCREEN_SETUP) setup_screen(&c);
-        else chats_screen(&c);
+        switch (c.screen) {
+        case SCREEN_SETUP:  setup_screen(&c);  break;
+        case SCREEN_UNLOCK: unlock_screen(&c); break;
+        case SCREEN_CHATS:  chats_screen(&c);  break;
+        }
         draw_toast(&c);
         ui_end();
         EndDrawing();
@@ -520,5 +583,7 @@ int main(int argc, char **argv)
     CloseWindow();
     client_close(&c.client);
     sqlite3_close(c.db);
+    crypto_wipe(&c.me, sizeof(c.me));
+    crypto_wipe(c.key, sizeof(c.key));
     return 0;
 }
