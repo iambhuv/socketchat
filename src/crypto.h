@@ -75,6 +75,45 @@ bool keys_equal(const uint8_t a[KEY_SIZE], const uint8_t b[KEY_SIZE])
     return memcmp(a, b, KEY_SIZE) == 0;
 }
 
+// Padding, so the server cannot tell "ok" from a paragraph: the text, one
+// 0x80 byte, then zeros up to a multiple of PAD_BLOCK. ISO/IEC 7816-4.
+#define PAD_BLOCK 64
+
+void pad_append(String_Builder *out, const uint8_t *data, size_t size)
+{
+    sb_append_buf(out, data, size);
+    da_append(out, (char)0x80);
+    while (out->count % PAD_BLOCK != 0) da_append(out, 0);
+}
+
+// Strips the padding in place. False when it is not there.
+bool unpad(String_Builder *sb)
+{
+    size_t n = sb->count;
+    while (n > 0 && sb->items[n - 1] == 0) n--;
+    if (n == 0 || (uint8_t)sb->items[n - 1] != 0x80) return false;
+    sb->count = n - 1;
+    return true;
+}
+
+// Twenty digits both sides can read out loud to check they hold each other's
+// real key. Same number no matter who computes it.
+#define SAFETY_NUMBER_SIZE 24
+
+void safety_number(char out[SAFETY_NUMBER_SIZE], const uint8_t a[KEY_SIZE], const uint8_t b[KEY_SIZE])
+{
+    uint8_t both[KEY_SIZE*2], hash[8];
+    bool a_first = memcmp(a, b, KEY_SIZE) < 0;
+    memcpy(both, a_first ? a : b, KEY_SIZE);
+    memcpy(both + KEY_SIZE, a_first ? b : a, KEY_SIZE);
+    crypto_blake2b(hash, sizeof(hash), both, sizeof(both));
+    uint64_t n = 0;
+    for (size_t i = 0; i < sizeof(hash); ++i) n = n << 8 | hash[i];
+    char digits[21];
+    snprintf(digits, sizeof(digits), "%020llu", (unsigned long long)n);
+    snprintf(out, SAFETY_NUMBER_SIZE, "%.5s %.5s %.5s %.5s", digits, digits + 5, digits + 10, digits + 15);
+}
+
 // Sealed boxes. The same Ed25519 identity doubles as an X25519 key:
 // the public key converts directly, the secret scalar is the first 32
 // bytes of BLAKE2b(seed), which is how the signing scalar is made too.

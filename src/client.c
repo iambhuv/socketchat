@@ -75,11 +75,12 @@ bool client_send_text(Client *c, const Identity *me, const uint8_t to[KEY_SIZE],
                       String_View text, uint64_t *timestamp_ms)
 {
     if (c->state != CLIENT_READY || c->waiting_for_ok) return false;
-    if (text.count == 0 || text.count > MSG_MAX_TEXT) return false;
+    if (text.count == 0 || text.count + PAD_BLOCK > MSG_MAX_TEXT) return false;
     *timestamp_ms = (uint64_t)time(NULL)*1000;
     Box box;
-    String_Builder cipher = {0}, payload = {0};
-    bool ok = box_seal(&box, &cipher, to, (const uint8_t *)text.data, text.count);
+    String_Builder padded = {0}, cipher = {0}, payload = {0};
+    pad_append(&padded, (const uint8_t *)text.data, text.count);
+    bool ok = box_seal(&box, &cipher, to, (const uint8_t *)padded.items, padded.count);
     if (ok) {
         msg_append_unsigned(&payload, me->pub, to, *timestamp_ms, &box,
                             (uint8_t *)cipher.items, (uint32_t)cipher.count);
@@ -88,6 +89,7 @@ bool client_send_text(Client *c, const Identity *me, const uint8_t to[KEY_SIZE],
         sb_append_buf(&payload, sig, SIG_SIZE);
         ok = client_send(c, FRAME_MSG, payload.items, (uint32_t)payload.count);
     }
+    sb_free(padded);
     sb_free(cipher);
     sb_free(payload);
     if (ok) c->waiting_for_ok = true;
@@ -145,7 +147,7 @@ static Client_Event client_handle(Client *c, const Identity *me, Frame *f)
                 return client_event(CLIENT_EVENT_NONE, "");
             }
             c->plain.count = 0;
-            if (!box_open(&c->plain, &e.msg.box, me, e.msg.cipher, e.msg.cipher_size)) {
+            if (!box_open(&c->plain, &e.msg.box, me, e.msg.cipher, e.msg.cipher_size) || !unpad(&c->plain)) {
                 nob_log(WARNING, "Dropping MSG from %s that was not sealed to us", key_short(e.msg.from));
                 return client_event(CLIENT_EVENT_NONE, "");
             }

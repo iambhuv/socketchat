@@ -75,6 +75,34 @@ bool test_messages(void)
     return true;
 }
 
+bool test_padding_and_safety(void)
+{
+    static const size_t sizes[] = { 1, 2, 63, 64, 65, 200 };
+    for (size_t i = 0; i < ARRAY_LEN(sizes); ++i) {
+        String_Builder sb = {0};
+        char *data = temp_alloc(sizes[i]);
+        memset(data, 'x', sizes[i]);
+        pad_append(&sb, (uint8_t *)data, sizes[i]);
+        CHECK(sb.count % PAD_BLOCK == 0 && sb.count > sizes[i]);
+        CHECK(unpad(&sb) && sb.count == sizes[i]);
+        sb_free(sb);
+    }
+    String_Builder bad = {0};
+    sb_append_cstr(&bad, "no marker");
+    CHECK(!unpad(&bad));
+    sb_free(bad);
+
+    Identity a, b;
+    CHECK(identity_generate(&a) && identity_generate(&b));
+    char ab[SAFETY_NUMBER_SIZE], ba[SAFETY_NUMBER_SIZE], aa[SAFETY_NUMBER_SIZE];
+    safety_number(ab, a.pub, b.pub);
+    safety_number(ba, b.pub, a.pub);
+    safety_number(aa, a.pub, a.pub);
+    CHECK(strcmp(ab, ba) == 0 && strcmp(ab, aa) != 0);
+    CHECK(strlen(ab) == 23 && ab[5] == ' ' && isdigit((unsigned char)ab[0]));
+    return true;
+}
+
 bool test_links(void)
 {
     Identity id;
@@ -155,6 +183,7 @@ int main(void)
         { "frames",     test_frames },
         { "messages",   test_messages },
         { "links",      test_links },
+        { "padding",    test_padding_and_safety },
         { "end_to_end", test_end_to_end },
     };
     size_t failed = 0;

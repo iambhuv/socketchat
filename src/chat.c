@@ -395,7 +395,13 @@ static void conversation(Chat *c)
     bool self = keys_equal(c->peer, c->me.pub);
     ui_avatar((Vector2){ left + 36, HEADER_HEIGHT/2 }, 18, self ? "You" : c->peer_name, true);
     ui_text(c->peer_name, left + 64, HEADER_HEIGHT/2 - 18, UI_BODY, t->text, true);
-    ui_text(self ? "Notes to yourself" : "Signed direct messages", left + 64, HEADER_HEIGHT/2 + 2, UI_CAPTION, t->muted, false);
+    const char *subtitle = "Notes to yourself";
+    if (!self) {
+        char number[SAFETY_NUMBER_SIZE];
+        safety_number(number, c->me.pub, c->peer);
+        subtitle = temp_sprintf("Encrypted. Safety number %s", number);
+    }
+    ui_text(subtitle, left + 64, HEADER_HEIGHT/2 + 2, UI_CAPTION, t->muted, false);
     ui_hline(left, HEADER_HEIGHT, w - left);
 
     // Composer at the bottom, messages stacked upwards from it.
