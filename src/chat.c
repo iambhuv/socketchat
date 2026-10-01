@@ -35,12 +35,12 @@ typedef struct {
     Client client;
     Screen screen;
 
-    // Setup screen
+    // Login
     char nickname[32];
     Text_State nickname_st;
     double login_started;       // 0 when not logging in
     bool auto_login;            // try on the first frame when a nickname is saved
-    char status[128];
+    char status[128];           // why we are offline, or "Pick a nickname first"
     bool status_bad;
 
     // Chats screen
@@ -126,11 +126,16 @@ static void restore_last_chat(Chat *c)
     if (known) open_chat(c, pub);
 }
 
+static void enter_chats(Chat *c)
+{
+    c->screen = SCREEN_CHATS;
+    db_contacts(c->db, &c->contacts);
+    restore_last_chat(c);
+}
+
 static void start_login(Chat *c)
 {
-    String_View nick = sv_trim(sv_from_cstr(c->nickname));
-    if (nick.count == 0) { set_status(c, true, "Pick a nickname first"); return; }
-
+    if (c->login_started > 0 || c->client.state == CLIENT_READY) return;
     String_View port_text = SVLIT(SERVER);
     String_View host = sv_chop_by_delim(&port_text, ':');
     uint16_t port = port_text.count > 0 ? (uint16_t)atoi(temp_sv_to_cstr(port_text)) : DEFAULT_PORT;
@@ -157,11 +162,7 @@ static void handle_events(Chat *c)
         switch (e.kind) {
         case CLIENT_EVENT_CONNECTED:
             c->login_started = 0;
-            db_set(c->db, "nickname", c->nickname);
-            db_contacts(c->db, &c->contacts);
             set_status(c, false, "Connected");
-            c->screen = SCREEN_CHATS;
-            restore_last_chat(c);
             break;
         case CLIENT_EVENT_MESSAGE: {
             bool known = keys_equal(e.msg.from, c->me.pub);
@@ -170,7 +171,7 @@ static void handle_events(Chat *c)
                 db_add_contact(c->db, e.msg.from, key_short(e.msg.from));
                 db_contacts(c->db, &c->contacts);
             }
-            db_store_message(c->db, e.msg.from, true, e.msg.timestamp_ms, e.msg.text);
+            db_store_message(c->db, e.msg.from, true, e.msg.timestamp_ms, e.text);
             if (c->chat_open && keys_equal(c->peer, e.msg.from)) reload_messages(c);
             else toast(c, temp_sprintf("Message from %s", contact_name(c, e.msg.from)));
             break;
@@ -191,8 +192,8 @@ static void handle_events(Chat *c)
         case CLIENT_EVENT_DISCONNECTED:
             c->login_started = 0;
             c->outgoing.waiting = false;
-            c->screen = SCREEN_SETUP;
-            set_status(c, true, temp_sprintf("Disconnected. "SV_Fmt, SV_Arg(e.error)));
+            set_status(c, true, temp_sv_to_cstr(e.error));
+            toast(c, temp_sprintf("Disconnected: "SV_Fmt, SV_Arg(e.error)));
             break;
         case CLIENT_EVENT_NONE:
         default:
@@ -205,6 +206,18 @@ static void send_draft(Chat *c)
 {
     String_View text = sv_trim(sv_from_cstr(c->draft));
     if (text.count == 0 || c->outgoing.waiting) return;
+    if (keys_equal(c->peer, c->me.pub)) {
+        // Notes to yourself never leave the machine.
+        db_store_message(c->db, c->peer, false, (uint64_t)time(NULL)*1000, text);
+        reload_messages(c);
+        c->draft[0] = '\0';
+        c->draft_st.cursor = 0;
+        return;
+    }
+    if (c->client.state != CLIENT_READY) {
+        snprintf(c->send_status, sizeof(c->send_status), "Not connected");
+        return;
+    }
     if (!client_send_text(&c->client, &c->me, c->peer, text, &c->outgoing.timestamp_ms)) {
         snprintf(c->send_status, sizeof(c->send_status), "Could not send");
         return;
@@ -246,15 +259,18 @@ static void setup_screen(Chat *c)
     Rectangle nick = { x, y + 24, card.width - 64, UI_CONTROL };
     bool submit = ui_input(nick, "How your friends know you", c->nickname, &c->nickname_st);
 
-    bool busy = c->login_started > 0;
     Rectangle btn = { x, nick.y + nick.height + 24, card.width - 64, UI_CONTROL };
-    if (ui_button(btn, busy ? "Connecting..." : "Connect", true) || (submit && !busy)) start_login(c);
-
-    if (c->status[0]) {
-        Color dot = c->status_bad ? t->err : (busy ? t->warn : t->ok);
-        DrawCircleV((Vector2){ x + 6, btn.y + btn.height + 32 }, 4, dot);
-        ui_text(c->status, x + 18, btn.y + btn.height + 24, UI_SMALL, t->muted, false);
+    if (ui_button(btn, "Get started", true) || submit) {
+        if (sv_trim(sv_from_cstr(c->nickname)).count == 0) {
+            set_status(c, true, "Pick a nickname first");
+        } else {
+            db_set(c->db, "nickname", c->nickname);
+            c->status[0] = '\0';
+            enter_chats(c);
+            start_login(c);
+        }
     }
+    if (c->status[0]) ui_text(c->status, x, btn.y + btn.height + 16, UI_SMALL, t->err, false);
 
     ui_text(temp_sprintf("build %s", GIT_HASH), 16, h - 28, UI_CAPTION, t->muted, false);
 }
@@ -310,8 +326,14 @@ static void sidebar(Chat *c)
 
     ui_avatar((Vector2){ 36, HEADER_HEIGHT/2 }, 18, c->nickname, true);
     ui_text(c->nickname, 64, HEADER_HEIGHT/2 - 18, UI_BODY, t->text, true);
-    DrawCircleV((Vector2){ 68, HEADER_HEIGHT/2 + 10 }, 3, t->ok);
-    ui_text("online", 76, HEADER_HEIGHT/2 + 2, UI_CAPTION, t->muted, false);
+    bool online = c->client.state == CLIENT_READY;
+    bool connecting = !online && c->client.state != CLIENT_OFFLINE;
+    DrawCircleV((Vector2){ 68, HEADER_HEIGHT/2 + 10 }, 3, online ? t->ok : connecting ? t->warn : t->err);
+    ui_text(online ? "online" : connecting ? "connecting" : "offline", 76, HEADER_HEIGHT/2 + 2, UI_CAPTION, t->muted, false);
+    if (!online && !connecting) {
+        Rectangle retry = { SIDEBAR_WIDTH - 16 - 64, HEADER_HEIGHT/2 - 16, 64, 32 };
+        if (ui_button(retry, "Retry", false)) start_login(c);
+    }
     ui_hline(0, HEADER_HEIGHT, SIDEBAR_WIDTH);
 
     // "You" first, then every contact that is not us.
@@ -460,6 +482,7 @@ int main(int argc, char **argv)
     db_get(c.db, "dark", dark, sizeof(dark));
     ui.dark = dark[0] == '1';
     c.auto_login = c.nickname[0] != '\0';
+    if (c.auto_login) enter_chats(&c);
     nob_log(INFO, "Identity %s, database %s, server %s", key_short(c.me.pub), db_path, SERVER);
 
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT);

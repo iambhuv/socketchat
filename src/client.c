@@ -20,6 +20,7 @@ typedef struct {
     Client_State state;
     String_Builder inbox;   // received bytes not parsed yet
     String_Builder outbox;  // scratch for encoding one frame
+    String_Builder plain;   // decrypted text of the last MESSAGE event
     size_t consumed;        // bytes of inbox handed out by the last poll
     bool waiting_for_ok;    // a MSG was sent and the server has not replied
 } Client;
@@ -27,7 +28,7 @@ typedef struct {
 typedef enum {
     CLIENT_EVENT_NONE,
     CLIENT_EVENT_CONNECTED,     // login finished
-    CLIENT_EVENT_MESSAGE,       // .msg is valid until the next client_poll
+    CLIENT_EVENT_MESSAGE,       // .msg and .text are valid until the next client_poll
     CLIENT_EVENT_SENT,          // the last message reached its recipient
     CLIENT_EVENT_REJECTED,      // the server refused the last message, see .error
     CLIENT_EVENT_DISCONNECTED,  // the socket is closed, see .error
@@ -36,6 +37,7 @@ typedef enum {
 typedef struct {
     Client_Event_Kind kind;
     Msg msg;
+    String_View text;    // decrypted
     String_View error;
 } Client_Event;
 
@@ -75,12 +77,18 @@ bool client_send_text(Client *c, const Identity *me, const uint8_t to[KEY_SIZE],
     if (c->state != CLIENT_READY || c->waiting_for_ok) return false;
     if (text.count == 0 || text.count > MSG_MAX_TEXT) return false;
     *timestamp_ms = (uint64_t)time(NULL)*1000;
-    String_Builder payload = {0};
-    msg_append_unsigned(&payload, me->pub, to, *timestamp_ms, text);
-    uint8_t sig[SIG_SIZE];
-    identity_sign(sig, me, payload.items, payload.count);
-    sb_append_buf(&payload, sig, SIG_SIZE);
-    bool ok = client_send(c, FRAME_MSG, payload.items, (uint32_t)payload.count);
+    Box box;
+    String_Builder cipher = {0}, payload = {0};
+    bool ok = box_seal(&box, &cipher, to, (const uint8_t *)text.data, text.count);
+    if (ok) {
+        msg_append_unsigned(&payload, me->pub, to, *timestamp_ms, &box,
+                            (uint8_t *)cipher.items, (uint32_t)cipher.count);
+        uint8_t sig[SIG_SIZE];
+        identity_sign(sig, me, payload.items, payload.count);
+        sb_append_buf(&payload, sig, SIG_SIZE);
+        ok = client_send(c, FRAME_MSG, payload.items, (uint32_t)payload.count);
+    }
+    sb_free(cipher);
     sb_free(payload);
     if (ok) c->waiting_for_ok = true;
     return ok;
@@ -136,9 +144,12 @@ static Client_Event client_handle(Client *c, const Identity *me, Frame *f)
                 nob_log(WARNING, "Dropping MSG from %s with a bad signature", key_short(e.msg.from));
                 return client_event(CLIENT_EVENT_NONE, "");
             }
-            // Our own messages come back when we chat with ourselves. We
-            // already store them when the OK arrives.
-            if (keys_equal(e.msg.from, me->pub)) return client_event(CLIENT_EVENT_NONE, "");
+            c->plain.count = 0;
+            if (!box_open(&c->plain, &e.msg.box, me, e.msg.cipher, e.msg.cipher_size)) {
+                nob_log(WARNING, "Dropping MSG from %s that was not sealed to us", key_short(e.msg.from));
+                return client_event(CLIENT_EVENT_NONE, "");
+            }
+            e.text = sb_to_sv(c->plain);
             return e;
         }
         return client_fail(c, temp_sprintf("Unexpected %s frame", frame_type_name(f->type)));

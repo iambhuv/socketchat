@@ -75,6 +75,75 @@ bool keys_equal(const uint8_t a[KEY_SIZE], const uint8_t b[KEY_SIZE])
     return memcmp(a, b, KEY_SIZE) == 0;
 }
 
+// Sealed boxes. The same Ed25519 identity doubles as an X25519 key:
+// the public key converts directly, the secret scalar is the first 32
+// bytes of BLAKE2b(seed), which is how the signing scalar is made too.
+
+static void x25519_secret(uint8_t out[32], const Identity *id)
+{
+    uint8_t hash[64];
+    crypto_blake2b(hash, sizeof(hash), id->sec, 32);
+    memcpy(out, hash, 32);
+    crypto_wipe(hash, sizeof(hash));
+}
+
+// key = BLAKE2b(shared || eph || recipient), as monocypher recommends:
+// raw X25519 output is not uniform enough to use as a key on its own.
+static void box_key(uint8_t key[32], const uint8_t shared[32],
+                    const uint8_t eph[KEY_SIZE], const uint8_t recipient_x[32])
+{
+    uint8_t material[96];
+    memcpy(material, shared, 32);
+    memcpy(material + 32, eph, 32);
+    memcpy(material + 64, recipient_x, 32);
+    crypto_blake2b(key, 32, material, sizeof(material));
+    crypto_wipe(material, sizeof(material));
+}
+
+// Encrypts `size` bytes so only the owner of `to` can read them. Appends the
+// ciphertext (same length) to `cipher` and fills the box.
+bool box_seal(Box *box, String_Builder *cipher, const uint8_t to[KEY_SIZE],
+              const uint8_t *plain, size_t size)
+{
+    uint8_t eph_sec[32], to_x[32], shared[32], key[32];
+    if (!random_bytes(eph_sec, sizeof(eph_sec)) || !random_bytes(box->nonce, BOX_NONCE_SIZE)) {
+        nob_log(ERROR, "Could not get random bytes from the OS");
+        return false;
+    }
+    crypto_x25519_public_key(box->eph, eph_sec);
+    crypto_eddsa_to_x25519(to_x, to);
+    crypto_x25519(shared, eph_sec, to_x);
+    box_key(key, shared, box->eph, to_x);
+    da_reserve(cipher, cipher->count + size);
+    crypto_aead_lock((uint8_t *)cipher->items + cipher->count, box->mac, key, box->nonce,
+                     NULL, 0, plain, size);
+    cipher->count += size;
+    crypto_wipe(eph_sec, sizeof(eph_sec));
+    crypto_wipe(shared, sizeof(shared));
+    crypto_wipe(key, sizeof(key));
+    return true;
+}
+
+// The reverse. Appends the plaintext to `plain`. False when the box was not
+// sealed to `me` or was tampered with.
+bool box_open(String_Builder *plain, const Box *box, const Identity *me,
+              const uint8_t *cipher, size_t size)
+{
+    uint8_t my_x[32], my_x_pub[32], shared[32], key[32];
+    x25519_secret(my_x, me);
+    crypto_eddsa_to_x25519(my_x_pub, me->pub);
+    crypto_x25519(shared, my_x, box->eph);
+    box_key(key, shared, box->eph, my_x_pub);
+    da_reserve(plain, plain->count + size);
+    int r = crypto_aead_unlock((uint8_t *)plain->items + plain->count, box->mac, key, box->nonce,
+                               NULL, 0, cipher, size);
+    if (r == 0) plain->count += size;
+    crypto_wipe(my_x, sizeof(my_x));
+    crypto_wipe(shared, sizeof(shared));
+    crypto_wipe(key, sizeof(key));
+    return r == 0;
+}
+
 void hex_encode(char *out, const uint8_t *in, size_t size)
 {
     static const char digits[] = "0123456789abcdef";

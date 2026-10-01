@@ -106,7 +106,7 @@ static bool peer_handle(Server *s, Peer *p, Frame *f)
             peer_send(s, p, FRAME_ERROR, "offline", 7);
             return true;
         }
-        nob_log(INFO, "%s -> %s (%zu bytes)", key_short(msg.from), key_short(msg.to), msg.text.count);
+        nob_log(INFO, "%s -> %s (%u bytes)", key_short(msg.from), key_short(msg.to), f->size);
         return peer_send(s, p, FRAME_OK, NULL, 0);
     }
     default:

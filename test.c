@@ -44,8 +44,11 @@ bool test_messages(void)
     CHECK(identity_generate(&alice) && identity_generate(&bob));
     CHECK(identity_is_valid(&alice));
 
-    String_Builder payload = {0};
-    msg_append_unsigned(&payload, alice.pub, bob.pub, 1234, SVLIT("hi bob"));
+    Box box;
+    String_Builder cipher = {0}, payload = {0}, plain = {0};
+    CHECK(box_seal(&box, &cipher, bob.pub, (const uint8_t *)"hi bob", 6));
+    CHECK(cipher.count == 6 && memcmp(cipher.items, "hi bob", 6) != 0);
+    msg_append_unsigned(&payload, alice.pub, bob.pub, 1234, &box, (uint8_t *)cipher.items, 6);
     uint8_t sig[SIG_SIZE];
     identity_sign(sig, &alice, payload.items, payload.count);
     sb_append_buf(&payload, sig, SIG_SIZE);
@@ -53,14 +56,22 @@ bool test_messages(void)
     Msg m;
     CHECK(msg_parse((uint8_t *)payload.items, (uint32_t)payload.count, &m));
     CHECK(keys_equal(m.from, alice.pub) && keys_equal(m.to, bob.pub));
-    CHECK(m.timestamp_ms == 1234 && sv_eq(m.text, SVLIT("hi bob")));
+    CHECK(m.timestamp_ms == 1234 && m.cipher_size == 6);
     CHECK(signature_ok(m.sig, alice.pub, m.signed_data, m.signed_size));
     CHECK(!signature_ok(m.sig, bob.pub, m.signed_data, m.signed_size));
-    payload.items[MSG_HEADER] ^= 1;  // flip a bit of the text
+    CHECK(box_open(&plain, &m.box, &bob, m.cipher, m.cipher_size));
+    CHECK(sv_eq(sb_to_sv(plain), SVLIT("hi bob")));
+    plain.count = 0;
+    CHECK(!box_open(&plain, &m.box, &alice, m.cipher, m.cipher_size)); // not sealed to alice
+
+    payload.items[MSG_HEADER] ^= 1;  // flip a bit of the ciphertext
     CHECK(msg_parse((uint8_t *)payload.items, (uint32_t)payload.count, &m));
     CHECK(!signature_ok(m.sig, alice.pub, m.signed_data, m.signed_size));
+    CHECK(!box_open(&plain, &m.box, &bob, m.cipher, m.cipher_size));
     CHECK(!msg_parse((uint8_t *)payload.items, 10, &m));
+    sb_free(cipher);
     sb_free(payload);
+    sb_free(plain);
     return true;
 }
 
@@ -110,14 +121,8 @@ bool test_end_to_end(void)
     CHECK(pump(&server, &a, &alice).kind == CLIENT_EVENT_SENT);
     Client_Event e = pump(&server, &b, &bob);
     CHECK(e.kind == CLIENT_EVENT_MESSAGE);
-    CHECK(keys_equal(e.msg.from, alice.pub) && sv_eq(e.msg.text, SVLIT("hello bob")));
+    CHECK(keys_equal(e.msg.from, alice.pub) && sv_eq(e.text, SVLIT("hello bob")));
     CHECK(e.msg.timestamp_ms == ts);
-
-    // Talking to yourself: the server echoes it, the client drops the echo
-    // and reports SENT.
-    CHECK(client_send_text(&a, &alice, alice.pub, SVLIT("note to self"), &ts));
-    CHECK(pump(&server, &a, &alice).kind == CLIENT_EVENT_SENT);
-    CHECK(pump(&server, &a, &alice).kind == CLIENT_EVENT_NONE);
 
     // Nobody home.
     uint8_t nobody[KEY_SIZE] = {0};
