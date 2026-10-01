@@ -1,8 +1,0 @@
-{
-  "name": "socket-chat",
-  "version-string": "0.1.0",
-  "dependencies": [
-    "libsodium",
-    "sqlite3"
-  ]
-}
