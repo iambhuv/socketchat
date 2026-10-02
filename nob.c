@@ -5,6 +5,7 @@
 //   ./nob test           build and run the tests
 //   ./nob run            build and start the client
 //   ./nob server [port]  build and start the server
+//   ./nob linux [arch]   cross-compile chatd for Linux with zig, x86_64 or aarch64
 //
 // The client's server address lives in build/server.h (generated on the
 // first build). Edit it, run ./nob again.
@@ -241,6 +242,23 @@ static bool build_program(const char *out, const char *source, bool gui)
     return cmd_run(&cmd);
 }
 
+// Cross-compiles the server for the VPS. `zig cc` ships its own Linux libc,
+// so the result is a static binary that runs on any Linux of that arch.
+static bool build_linux_server(const char *arch)
+{
+    Cmd cmd = {0};
+    const char *out = temp_sprintf(BUILD "chatd-linux-%s", arch);
+    cmd_append(&cmd, "zig", "cc", "-target", temp_sprintf("%s-linux-musl", arch));
+    cmd_append(&cmd, "-O2", "-Wall", "-Wextra", "-Wno-unused-function", "-I" SRC, "-I" THIRD);
+    cmd_append(&cmd, "-o", out, SRC "chatd.c", THIRD "monocypher.c");
+    if (!cmd_run(&cmd)) {
+        nob_log(ERROR, "Is zig installed? On macOS: brew install zig");
+        return false;
+    }
+    nob_log(INFO, "Built %s", out);
+    return true;
+}
+
 static bool build_all(void)
 {
     if (!mkdir_if_not_exists(BUILD)) return false;
@@ -284,6 +302,10 @@ int main(int argc, char **argv)
         da_append_many(&cmd, argv, argc);
         return cmd_run(&cmd) ? 0 : 1;
     }
-    nob_log(ERROR, "Unknown command `%s`. Commands: build, test, run, server", command);
+    if (strcmp(command, "linux") == 0) {
+        if (!mkdir_if_not_exists(BUILD)) return 1;
+        return build_linux_server(argc > 0 ? shift(argv, argc) : "x86_64") ? 0 : 1;
+    }
+    nob_log(ERROR, "Unknown command `%s`. Commands: build, test, run, server, linux", command);
     return 1;
 }
