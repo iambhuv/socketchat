@@ -132,7 +132,7 @@ static bool generate_server_h(void)
     const char *text =
         "// The server the client connects to, as host or host:port.\n"
         "// Edit this and run ./nob again. Deleting the file restores the default.\n"
-        "#define SERVER \"127.0.0.1:5050\"\n";
+        "#define SERVER \"apt.promtuz.dev:7777\"\n";
     if (!write_entire_file(path, text, strlen(text))) return false;
     nob_log(INFO, "Generated %s with the default server. Edit it to point at yours.", path);
     return true;
