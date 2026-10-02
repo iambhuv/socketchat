@@ -13,6 +13,7 @@ You need a C compiler. Nothing else.
 cc -o nob nob.c        # once. On Windows with Visual Studio: cl nob.c
 ./nob                  # builds build/chat and build/chatd
 ./nob test             # runs the tests
+./nob release          # the build to hand out: optimised and stripped
 ./nob linux            # cross-compiles chatd for a Linux server (needs zig)
 ```
 

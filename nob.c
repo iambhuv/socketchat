@@ -6,6 +6,7 @@
 //   ./nob run            build and start the client
 //   ./nob server [port]  build and start the server
 //   ./nob linux [arch]   cross-compile chatd for Linux with zig, x86_64 or aarch64
+//   ./nob release        like build, but optimised, stripped, asserts off
 //
 // The client's server address lives in build/server.h (generated on the
 // first build). Edit it, run ./nob again.
@@ -27,13 +28,17 @@
 
 static const char *raylib_modules[] = { "rcore", "rshapes", "rtextures", "rtext", "utils", "rglfw" };
 
+static bool release = false; // ./nob release: optimised, stripped, asserts off
+
 static void compiler(Cmd *cmd, bool quiet)
 {
     nob_cc(cmd);
     if (MSVC) {
         cmd_append(cmd, "/nologo", "/D_CRT_SECURE_NO_WARNINGS", quiet ? "/w" : "/W3");
+        if (release) cmd_append(cmd, "/O2", "/DNDEBUG");
     } else {
-        cmd_append(cmd, "-g");
+        if (release) cmd_append(cmd, "-O2", "-DNDEBUG");
+        else cmd_append(cmd, "-g");
         if (quiet) cmd_append(cmd, "-O2", "-w");
         else cmd_append(cmd, "-Wall", "-Wextra", "-Wno-unused-function", "-Wno-missing-field-initializers");
     }
@@ -239,7 +244,12 @@ static bool build_program(const char *out, const char *source, bool gui)
     cmd_append(&cmd, source, THIRD "monocypher.c");
     if (gui) cmd_append(&cmd, BUILD "sqlite3" OBJ, MSVC ? BUILD "raylib.lib" : BUILD "libraylib.a");
     platform_libs(&cmd, gui);
-    return cmd_run(&cmd);
+    if (!cmd_run(&cmd)) return false;
+    if (release && !MSVC) {
+        cmd_append(&cmd, "strip", out); // Apple's linker calls -s obsolete, so strip afterwards
+        return cmd_run(&cmd);
+    }
+    return true;
 }
 
 // Cross-compiles the server for the VPS. `zig cc` ships its own Linux libc,
@@ -249,7 +259,7 @@ static bool build_linux_server(const char *arch)
     Cmd cmd = {0};
     const char *out = temp_sprintf(BUILD "chatd-linux-%s", arch);
     cmd_append(&cmd, "zig", "cc", "-target", temp_sprintf("%s-linux-musl", arch));
-    cmd_append(&cmd, "-O2", "-Wall", "-Wextra", "-Wno-unused-function", "-I" SRC, "-I" THIRD);
+    cmd_append(&cmd, "-O2", "-DNDEBUG", "-s", "-Wall", "-Wextra", "-Wno-unused-function", "-I" SRC, "-I" THIRD);
     cmd_append(&cmd, "-o", out, SRC "chatd.c", THIRD "monocypher.c");
     if (!cmd_run(&cmd)) {
         nob_log(ERROR, "Is zig installed? On macOS: brew install zig");
@@ -281,6 +291,10 @@ int main(int argc, char **argv)
     Cmd cmd = {0};
 
     if (strcmp(command, "build") == 0) {
+        return build_all() ? 0 : 1;
+    }
+    if (strcmp(command, "release") == 0) {
+        release = true;
         return build_all() ? 0 : 1;
     }
     if (strcmp(command, "test") == 0) {
