@@ -30,7 +30,7 @@ That is the whole product.
 
 ## Privacy, in the order it is built
 
-1. **End-to-end encryption.** An Ed25519 key converts to an X25519 key, so
+1. **End-to-end encryption.** A Monocypher EdDSA key (Curve25519 + BLAKE2b) converts to an X25519 key, so
    every contact link is also an encryption key. Each message is a sealed
    box: the sender makes a throwaway X25519 keypair, agrees a secret with the
    recipient's key, hashes it into an AEAD key and encrypts the text with
@@ -68,7 +68,7 @@ something else gets deleted first.
 | `clay.h`        | Responsive immediate-mode layout       | Pinned v0.14 single-header layout engine; its raylib renderer turns Clay commands into draw calls. |
 | `stb_textedit.h`| Text-field editing                     | Pinned v1.14 editing core with selection, clipboard replacement, word movement, and undo/redo; the app supplies UTF-32 storage and raylib input. |
 | `sqlite3.c`     | Client storage                        | One amalgamation file, compiled once into `build/sqlite3.o`. |
-| `monocypher.c`  | Ed25519 sign and verify               | One `.c` + one `.h`. Replaces libsodium.      |
+| `monocypher.c`  | EdDSA with BLAKE2b sign and verify               | One `.c` + one `.h`. Replaces libsodium.      |
 
 Random bytes come from the OS: `arc4random_buf` (macOS, BSD), `getrandom`
 (Linux), `BCryptGenRandom` (Windows). That and `net.h` are the only places

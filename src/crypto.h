@@ -1,7 +1,7 @@
 // crypto.h - identity keypairs, signatures, random bytes, contact links.
 //
 // Thin layer over monocypher (thirdparty/monocypher.c). An identity is an
-// Ed25519 keypair. The public key is the user's address on the network.
+// Monocypher EdDSA (Curve25519 + BLAKE2b) keypair. The public key is the user's address on the network.
 // Include nob.h and protocol.h before this file.
 #ifndef CRYPTO_H_
 #define CRYPTO_H_
@@ -161,7 +161,7 @@ void safety_number(char out[SAFETY_NUMBER_SIZE], const uint8_t a[KEY_SIZE], cons
     snprintf(out, SAFETY_NUMBER_SIZE, "%.5s %.5s %.5s %.5s", digits, digits + 5, digits + 10, digits + 15);
 }
 
-// Sealed boxes. The same Ed25519 identity doubles as an X25519 key:
+// Sealed boxes. The same EdDSA identity converts to an X25519 key:
 // the public key converts directly, the secret scalar is the first 32
 // bytes of BLAKE2b(seed), which is how the signing scalar is made too.
 

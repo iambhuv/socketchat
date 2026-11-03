@@ -146,8 +146,12 @@ static bool generate_build_h(void)
     cmd_append(&cmd, "git", "rev-parse", "--short", "HEAD");
     Log_Handler *saved = get_log_handler();
     set_log_handler(null_log_handler);
-    bool have_git = cmd_run(&cmd, .stdout_path = BUILD "git_hash.txt") &&
-                    read_entire_file(BUILD "git_hash.txt", &hash);
+    // An LMS source ZIP has no repository and must build without Git.
+    bool have_git = false;
+    if (file_exists(".git")) {
+        have_git = cmd_run(&cmd, .stdout_path = BUILD "git_hash.txt") &&
+                   read_entire_file(BUILD "git_hash.txt", &hash);
+    }
     set_log_handler(saved);
     while (hash.count > 0 && isspace(da_last(&hash))) hash.count--;
     if (!have_git || hash.count == 0) sb_append_cstr(&hash, "unknown");
