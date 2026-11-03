@@ -1,21 +1,10 @@
-// ui.c - the few widgets the client needs: panel, button, text input,
-// wrapped text, avatar. Immediate mode: every widget is a function you call
-// each frame, and it tells you what happened.
-//
-// Design system, so every screen looks like the same app:
-//   type scale   title 24  heading 18  body 15  small 13  caption 12
-//   spacing      multiples of 8
-//   radius       8 for controls, 12 for cards and bubbles
-//   surfaces     flat, 1px border, no shadows
-//   colors       one neutral ramp, one accent, three status colors
-//
-// A widget is identified by the source line that calls it (UI_ID). The
-// toolkit's own bookkeeping lives in one `ui` struct below. Application
-// state does not belong here.
+// ui.c - Clay layout components plus standard single-line text editing.
+// Clay owns layout, raylib owns the platform, and stb_textedit owns editing.
 #ifndef UI_C_
 #define UI_C_
 
 #include <math.h>
+#include <stdlib.h>
 
 #define UI_TITLE    24
 #define UI_HEADING  18
@@ -25,6 +14,7 @@
 #define UI_RADIUS   8
 #define UI_CONTROL  40
 #define UI_PAD      16
+#define UI_TEXT_CAP 2048
 
 typedef struct {
     Color bg, surface, surface2, border, text, muted, accent, accent_hi, accent_soft, ok, warn, err;
@@ -45,25 +35,16 @@ static const Theme THEME_DARK = {
 };
 
 typedef struct {
-    uint64_t id;
-    float t;
-} Ui_Anim;
-
-typedef struct {
-    Font font, bold;
+    Font fonts[2];
     bool dark;
-    uint64_t active_id;   // widget that captured the mouse press
-    uint64_t focus_id;    // text input that has the keyboard
-    int cursor;           // mouse cursor to show at the end of the frame
-    Ui_Anim anim[128];
+    uint64_t active_id, focus_id;
+    int cursor;
+    void *clay_memory;
 } Ui;
 
 static Ui ui;
 
-const Theme *theme(void)
-{
-    return ui.dark ? &THEME_DARK : &THEME_LIGHT;
-}
+const Theme *theme(void) { return ui.dark ? &THEME_DARK : &THEME_LIGHT; }
 
 uint64_t ui_id(const char *file, int line, int extra)
 {
@@ -76,8 +57,34 @@ uint64_t ui_id(const char *file, int line, int extra)
 
 #define UI_ID(extra) ui_id(__FILE__, __LINE__, (extra))
 
-// Fonts are rasterised large and drawn smaller with mipmaps, which is what
-// keeps them crisp on both regular and HiDPI screens.
+static Clay_Color ui_clay_color(Color c) { return (Clay_Color){ c.r, c.g, c.b, c.a }; }
+static Clay_String ui_clay_string(const char *s) { return (Clay_String){ .length = (int32_t)strlen(s), .chars = s }; }
+
+static Clay_ElementId ui_clay_id(const char *kind, uint64_t id)
+{
+    char key[48];
+    int n = snprintf(key, sizeof(key), "%s-%016llx", kind, (unsigned long long)id);
+    return Clay_GetElementId((Clay_String){ .length = n, .chars = key });
+}
+
+static Clay_Dimensions ui_measure_clay(Clay_StringSlice text, Clay_TextElementConfig *config, void *data)
+{
+    Ui *state = data;
+    Font font = state->fonts[config->fontId < ARRAY_LEN(state->fonts) ? config->fontId : 0];
+    char *copy = temp_alloc((size_t)text.length + 1);
+    memcpy(copy, text.chars, (size_t)text.length);
+    copy[text.length] = '\0';
+    Vector2 size = MeasureTextEx(font, copy, (float)config->fontSize, (float)config->letterSpacing);
+    return (Clay_Dimensions){ size.x, config->lineHeight ? config->lineHeight : size.y };
+}
+
+static void ui_clay_error(Clay_ErrorData error)
+{
+    nob_log(ERROR, "Clay: %.*s", error.errorText.length, error.errorText.chars);
+}
+
+void Clay_Raylib_Render(Clay_RenderCommandArray commands, Font *fonts);
+
 Font ui_load_font(const unsigned char *data, size_t size)
 {
     Font font = LoadFontFromMemory(".ttf", data, (int)size, 64, NULL, 0);
@@ -88,47 +95,72 @@ Font ui_load_font(const unsigned char *data, size_t size)
 
 void ui_init(Font font, Font bold)
 {
-    ui.font = font;
-    ui.bold = bold;
+    ui.fonts[0] = font;
+    ui.fonts[1] = bold;
+    uint32_t bytes = Clay_MinMemorySize();
+    ui.clay_memory = malloc(bytes);
+    assert(ui.clay_memory);
+    Clay_Initialize(Clay_CreateArenaWithCapacityAndMemory(bytes, ui.clay_memory),
+                    (Clay_Dimensions){ GetScreenWidth(), GetScreenHeight() },
+                    (Clay_ErrorHandler){ .errorHandlerFunction = ui_clay_error });
+    Clay_SetMeasureTextFunction(ui_measure_clay, &ui);
+}
+
+void ui_shutdown(void)
+{
+    free(ui.clay_memory);
+    ui.clay_memory = NULL;
 }
 
 void ui_begin(void)
 {
     ui.cursor = MOUSE_CURSOR_DEFAULT;
+    Clay_SetLayoutDimensions((Clay_Dimensions){ GetScreenWidth(), GetScreenHeight() });
+    Vector2 mouse = GetMousePosition();
+    Clay_SetPointerState((Clay_Vector2){ mouse.x, mouse.y }, IsMouseButtonDown(MOUSE_BUTTON_LEFT));
+    Vector2 wheel = GetMouseWheelMoveV();
+    Clay_UpdateScrollContainers(false, (Clay_Vector2){ wheel.x, wheel.y }, GetFrameTime());
+    Clay_BeginLayout();
 }
 
 void ui_end(void)
 {
+    Clay_Raylib_Render(Clay_EndLayout(), ui.fonts);
     SetMouseCursor(ui.cursor);
-    // A widget that captured the press but is no longer drawn (screen
-    // changed, dialog closed) would otherwise keep the capture forever.
-    // This runs after every widget had its chance to see the release.
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) ui.active_id = 0;
 }
 
-// Smoothly moves towards 1 while `on`, towards 0 otherwise.
-static float ui_anim(uint64_t id, bool on)
+void ui_text(const char *text, float size, Color color, bool bold)
 {
-    Ui_Anim *slot = &ui.anim[id % ARRAY_LEN(ui.anim)];
-    if (slot->id != id) {
-        slot->id = id;
-        slot->t = 0;
+    CLAY_TEXT(ui_clay_string(text), CLAY_TEXT_CONFIG({
+        .fontId = bold ? 1 : 0, .fontSize = (uint16_t)size, .textColor = ui_clay_color(color),
+    }));
+}
+
+void ui_hline(void)
+{
+    CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(1) } },
+           .backgroundColor = ui_clay_color(theme()->border) }) {}
+}
+
+void ui_avatar(const char *name, bool strong)
+{
+    const Theme *t = theme();
+    char initial[2] = { name[0] ? (char)toupper((unsigned char)name[0]) : '?', '\0' };
+    CLAY({ .layout = {
+               .sizing = { CLAY_SIZING_FIXED(40), CLAY_SIZING_FIXED(40) },
+               .childAlignment = { CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER },
+           }, .backgroundColor = ui_clay_color(strong ? t->accent : t->accent_soft),
+           .cornerRadius = CLAY_CORNER_RADIUS(20) }) {
+        ui_text(temp_strdup(initial), 18, strong ? WHITE : t->accent, true);
     }
-    float target = on ? 1.0f : 0.0f;
-    float k = 16.0f*GetFrameTime();
-    slot->t += (target - slot->t)*(k > 1.0f ? 1.0f : k);
-    return slot->t;
 }
 
-static bool ui_hovered(Rectangle r)
-{
-    return CheckCollisionPointRec(GetMousePosition(), r);
-}
+static bool ui_hovered(uint64_t id) { return Clay_PointerOver(ui_clay_id("widget", id)); }
 
-// Press inside captures the widget, release inside counts as a click.
-static bool ui_click(uint64_t id, Rectangle r)
+static bool ui_click(uint64_t id)
 {
-    bool over = ui_hovered(r);
+    bool over = ui_hovered(id);
     if (over) ui.cursor = MOUSE_CURSOR_POINTING_HAND;
     if (ui.active_id == 0 && over && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) ui.active_id = id;
     if (ui.active_id == id && IsMouseButtonReleased(MOUSE_BUTTON_LEFT)) {
@@ -138,278 +170,409 @@ static bool ui_click(uint64_t id, Rectangle r)
     return false;
 }
 
-static Color ui_lerp(Color a, Color b, float t)
-{
-    return (Color){
-        a.r + (b.r - a.r)*t, a.g + (b.g - a.g)*t, a.b + (b.b - a.b)*t, a.a + (b.a - a.a)*t,
-    };
-}
-
-static float ui_roundness(Rectangle r, float radius)
-{
-    float side = r.width < r.height ? r.width : r.height;
-    if (side <= 0) return 0;
-    float v = radius*2/side;
-    return v > 1 ? 1 : v;
-}
-
-Vector2 ui_measure(const char *text, float size, bool bold)
-{
-    return MeasureTextEx(bold ? ui.bold : ui.font, text, size, 0);
-}
-
-void ui_text(const char *text, float x, float y, float size, Color color, bool bold)
-{
-    DrawTextEx(bold ? ui.bold : ui.font, text, (Vector2){x, y}, size, 0, color);
-}
-
-void ui_text_centered(const char *text, Rectangle r, float size, Color color, bool bold)
-{
-    Vector2 m = ui_measure(text, size, bold);
-    ui_text(text, r.x + (r.width - m.x)/2, r.y + (r.height - m.y)/2, size, color, bold);
-}
-
-// A flat surface with a hairline border.
-void ui_panel(Rectangle r, float radius, Color fill, Color border)
-{
-    DrawRectangleRounded(r, ui_roundness(r, radius), 10, fill);
-    DrawRectangleRoundedLinesEx(r, ui_roundness(r, radius), 10, 1, border);
-}
-
-void ui_hline(float x, float y, float width)
-{
-    DrawRectangle((int)x, (int)y, (int)width, 1, theme()->border);
-}
-
-// A circle with the first letter of a name.
-void ui_avatar(Vector2 center, float radius, const char *name, bool strong)
+bool ui_button_id(uint64_t id, const char *label, bool primary)
 {
     const Theme *t = theme();
-    DrawCircleV(center, radius, strong ? t->accent : t->accent_soft);
-    char initial[2] = { name[0] ? (char)toupper((unsigned char)name[0]) : '?', '\0' };
-    Rectangle r = { center.x - radius, center.y - radius, radius*2, radius*2 };
-    ui_text_centered(initial, r, radius*1.1f, strong ? WHITE : t->accent, true);
-}
-
-bool ui_button_id(uint64_t id, Rectangle r, const char *label, bool primary)
-{
-    const Theme *t = theme();
-    bool clicked = ui_click(id, r);
-    float hover = ui_anim(id, ui_hovered(r) || ui.active_id == id);
-    if (primary) {
-        ui_panel(r, UI_RADIUS, ui_lerp(t->accent, t->accent_hi, hover), BLANK);
-        ui_text_centered(label, r, UI_BODY, WHITE, true);
-    } else {
-        ui_panel(r, UI_RADIUS, ui_lerp(t->surface, t->surface2, hover), t->border);
-        ui_text_centered(label, r, UI_BODY, t->text, true);
+    bool hovered = ui_hovered(id);
+    bool clicked = ui_click(id);
+    Color fill = primary ? (hovered ? t->accent_hi : t->accent) : (hovered ? t->surface2 : t->surface);
+    CLAY({ .id = ui_clay_id("widget", id), .layout = {
+               .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(UI_CONTROL) },
+               .childAlignment = { CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER },
+           }, .backgroundColor = ui_clay_color(fill), .cornerRadius = CLAY_CORNER_RADIUS(UI_RADIUS),
+           .border = { .color = ui_clay_color(primary ? fill : t->border), .width = CLAY_BORDER_OUTSIDE(1) } }) {
+        ui_text(label, UI_BODY, primary ? WHITE : t->text, true);
     }
     return clicked;
 }
 
-#define ui_button(r, label, primary) ui_button_id(UI_ID(0), (r), (label), (primary))
+#define ui_button(label, primary) ui_button_id(UI_ID(0), (label), (primary))
+
+// stb_textedit uses UTF-32 indexes internally, avoiding cursor positions that
+// can split UTF-8. The external buffers remain UTF-8 so the rest of the app,
+// database, and network protocol do not change.
+#define STB_TEXTEDIT_CHARTYPE uint32_t
+#include "stb_textedit.h"
 
 typedef struct {
-    size_t cursor;    // byte offset into the buffer
-    float scroll;     // pixels scrolled horizontally
-    double blink;     // time of the last edit, keeps the caret visible
+    uint32_t chars[UI_TEXT_CAP];
+    size_t count, byte_cap;
+    char *bound;
+    uint64_t fingerprint;
+    float scroll;
+    double blink;
+    bool initialized;
+    STB_TexteditState edit;
 } Text_State;
 
-static size_t utf8_prev(const char *s, size_t i)
+typedef struct { Text_State *state; } Text_Buffer;
+
+// The implementation lives below the adapter callbacks, as stb_textedit
+// requires those callbacks to be defined before it is included.
+static void stb_textedit_initialize_state(STB_TexteditState *state, int is_single_line);
+
+static uint64_t text_fingerprint(const char *s)
 {
-    if (i == 0) return 0;
-    --i;
-    while (i > 0 && (s[i] & 0xC0) == 0x80) --i;
-    return i;
+    uint64_t h = 1469598103934665603ULL;
+    for (; *s; ++s) { h ^= (uint8_t)*s; h *= 1099511628211ULL; }
+    return h;
 }
 
-static size_t utf8_next(const char *s, size_t i)
+static int text_utf8_size(uint32_t cp)
 {
-    if (s[i] == '\0') return i;
-    ++i;
-    while ((s[i] & 0xC0) == 0x80) ++i;
-    return i;
+    return cp <= 0x7f ? 1 : cp <= 0x7ff ? 2 : cp <= 0xffff ? 3 : 4;
 }
 
-static void ui_insert(char *buf, size_t cap, size_t *cursor, int codepoint)
+static size_t text_bytes(const Text_State *st)
 {
+    size_t n = 0;
+    for (size_t i = 0; i < st->count; ++i) n += text_utf8_size(st->chars[i]);
+    return n;
+}
+
+static void text_write(Text_State *st)
+{
+    char *out = st->bound;
+    size_t n = 0;
+    for (size_t i = 0; i < st->count; ++i) {
+        int width;
+        const char *encoded = CodepointToUTF8((int)st->chars[i], &width);
+        if (n + (size_t)width >= st->byte_cap) break;
+        memcpy(out + n, encoded, (size_t)width);
+        n += (size_t)width;
+    }
+    out[n] = '\0';
+    st->fingerprint = text_fingerprint(out);
+}
+
+static void text_read(Text_State *st, char *buf, size_t cap)
+{
+    st->bound = buf;
+    st->byte_cap = cap;
+    st->count = 0;
+    for (const char *p = buf; *p && st->count < UI_TEXT_CAP - 1;) {
+        int width;
+        int cp = GetCodepointNext(p, &width);
+        if (width <= 0) break;
+        st->chars[st->count++] = cp > 0 ? (uint32_t)cp : '?';
+        p += width;
+    }
+    st->fingerprint = text_fingerprint(buf);
+    stb_textedit_initialize_state(&st->edit, true);
+    st->edit.cursor = (int)st->count;
+    st->initialized = true;
+}
+
+static void text_bind(Text_State *st, char *buf, size_t cap)
+{
+    if (!st->initialized || st->bound != buf || st->byte_cap != cap || st->fingerprint != text_fingerprint(buf)) {
+        text_read(st, buf, cap);
+    }
+}
+
+static int text_string_len(Text_Buffer *buf) { return (int)buf->state->count; }
+static uint32_t text_get_char(Text_Buffer *buf, int i) { return buf->state->chars[i]; }
+static int text_is_space(uint32_t cp) { return cp == ' ' || cp == '\t' || cp == '\n' || cp == '\r'; }
+
+static void text_layout_row(StbTexteditRow *row, Text_Buffer *buf, int start)
+{
+    Text_State *st = buf->state;
+    float width = 0;
+    for (size_t i = (size_t)start; i < st->count; ++i) {
+        int n;
+        const char *s = CodepointToUTF8((int)st->chars[i], &n);
+        char glyph[8];
+        memcpy(glyph, s, (size_t)n);
+        glyph[n] = '\0';
+        width += MeasureTextEx(ui.fonts[0], glyph, UI_BODY, 0).x;
+    }
+    row->x0 = 0; row->x1 = width; row->baseline_y_delta = UI_BODY; row->ymin = 0; row->ymax = UI_BODY;
+    row->num_chars = (int)st->count - start;
+}
+
+static float text_width(Text_Buffer *buf, int start, int i)
+{
+    (void)start;
     int n;
-    const char *enc = CodepointToUTF8(codepoint, &n);
-    size_t len = strlen(buf);
-    if (len + n >= cap) return;
-    memmove(buf + *cursor + n, buf + *cursor, len - *cursor + 1);
-    memcpy(buf + *cursor, enc, n);
-    *cursor += n;
+    const char *s = CodepointToUTF8((int)buf->state->chars[i], &n);
+    char glyph[8];
+    memcpy(glyph, s, (size_t)n);
+    glyph[n] = '\0';
+    return MeasureTextEx(ui.fonts[0], glyph, UI_BODY, 0).x;
+}
+
+static void text_delete(Text_Buffer *buf, int at, int count)
+{
+    Text_State *st = buf->state;
+    memmove(st->chars + at, st->chars + at + count, (st->count - (size_t)at - (size_t)count)*sizeof(st->chars[0]));
+    st->count -= (size_t)count;
+}
+
+static int text_insert_chars(Text_Buffer *buf, int at, const uint32_t *chars, int count)
+{
+    Text_State *st = buf->state;
+    if (count < 0 || st->count + (size_t)count >= UI_TEXT_CAP) return 0;
+    size_t bytes = text_bytes(st);
+    for (int i = 0; i < count; ++i) bytes += (size_t)text_utf8_size(chars[i]);
+    if (bytes >= st->byte_cap) return 0;
+    memmove(st->chars + at + count, st->chars + at, (st->count - (size_t)at)*sizeof(st->chars[0]));
+    memcpy(st->chars + at, chars, (size_t)count*sizeof(chars[0]));
+    st->count += (size_t)count;
+    return 1;
+}
+
+#define STB_TEXTEDIT_STRING             Text_Buffer
+#define STB_TEXTEDIT_STRINGLEN(obj)     text_string_len(obj)
+#define STB_TEXTEDIT_LAYOUTROW(row,obj,start) text_layout_row((row), (obj), (start))
+#define STB_TEXTEDIT_GETWIDTH(obj,start,i) text_width((obj), (start), (i))
+#define STB_TEXTEDIT_KEYTOTEXT(key)     ((key) < 0x10000 ? (key) : -1)
+#define STB_TEXTEDIT_GETCHAR(obj,i)     text_get_char((obj), (i))
+#define STB_TEXTEDIT_NEWLINE             '\n'
+#define STB_TEXTEDIT_DELETECHARS(obj,i,n) text_delete((obj), (i), (n))
+#define STB_TEXTEDIT_INSERTCHARS(obj,i,c,n) text_insert_chars((obj), (i), (c), (n))
+#define STB_TEXTEDIT_IS_SPACE(ch)       text_is_space(ch)
+#define STB_TEXTEDIT_K_SHIFT            0x40000000
+#define STB_TEXTEDIT_K_LEFT             0x10001
+#define STB_TEXTEDIT_K_RIGHT            0x10002
+#define STB_TEXTEDIT_K_UP               0x10003
+#define STB_TEXTEDIT_K_DOWN             0x10004
+#define STB_TEXTEDIT_K_PGUP             0x10005
+#define STB_TEXTEDIT_K_PGDOWN           0x10006
+#define STB_TEXTEDIT_K_LINESTART        0x10007
+#define STB_TEXTEDIT_K_LINEEND          0x10008
+#define STB_TEXTEDIT_K_TEXTSTART        0x10009
+#define STB_TEXTEDIT_K_TEXTEND          0x1000a
+#define STB_TEXTEDIT_K_DELETE           0x1000b
+#define STB_TEXTEDIT_K_BACKSPACE        0x1000c
+#define STB_TEXTEDIT_K_UNDO             0x1000d
+#define STB_TEXTEDIT_K_REDO             0x1000e
+#define STB_TEXTEDIT_K_WORDLEFT         0x1000f
+#define STB_TEXTEDIT_K_WORDRIGHT        0x10010
+#define STB_TEXTEDIT_IMPLEMENTATION
+#include "stb_textedit.h"
+
+static void text_copy_selection(Text_State *st)
+{
+    int first = st->edit.select_start < st->edit.select_end ? st->edit.select_start : st->edit.select_end;
+    int last = st->edit.select_start > st->edit.select_end ? st->edit.select_start : st->edit.select_end;
+    if (first == last) return;
+    char *out = temp_alloc((size_t)(last - first)*4 + 1);
+    size_t n = 0;
+    for (int i = first; i < last; ++i) {
+        int width;
+        const char *s = CodepointToUTF8((int)st->chars[i], &width);
+        memcpy(out + n, s, (size_t)width);
+        n += (size_t)width;
+    }
+    out[n] = '\0';
+    SetClipboardText(out);
+}
+
+static void text_paste(Text_Buffer *buf)
+{
+    const char *clip = GetClipboardText();
+    if (!clip) return;
+    uint32_t *chars = temp_alloc((strlen(clip) + 1)*sizeof(*chars));
+    int count = 0;
+    while (*clip) {
+        int width;
+        int cp = GetCodepointNext(clip, &width);
+        if (width <= 0) break;
+        if (cp >= 32 && count < UI_TEXT_CAP - 1) chars[count++] = (uint32_t)cp;
+        clip += width;
+    }
+    stb_textedit_paste(buf, &buf->state->edit, chars, count);
+}
+
+static void text_select_word(Text_State *st, bool left)
+{
+    int edge = st->edit.cursor;
+    if (left) {
+        while (edge > 0 && text_is_space(st->chars[edge - 1])) --edge;
+        while (edge > 0 && !text_is_space(st->chars[edge - 1])) --edge;
+        st->edit.select_start = edge;
+        st->edit.select_end = st->edit.cursor;
+    } else {
+        while (edge < (int)st->count && text_is_space(st->chars[edge])) ++edge;
+        while (edge < (int)st->count && !text_is_space(st->chars[edge])) ++edge;
+        st->edit.select_start = st->edit.cursor;
+        st->edit.select_end = edge;
+    }
 }
 
 #define KEY_REPEAT(k) (IsKeyPressed(k) || IsKeyPressedRepeat(k))
 
-// Applies this frame's keyboard input to the buffer. True when Enter was hit.
-static bool ui_edit(char *buf, size_t cap, Text_State *st)
+static bool text_edit(Text_State *st)
 {
-    size_t len = strlen(buf);
-    if (st->cursor > len) st->cursor = len;
-    bool mod = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) ||
-               IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
+    Text_Buffer buf = { st };
+    bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    bool control = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+    bool command = IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
+#ifdef __APPLE__
+    (void)control;
+    bool shortcut = command;
+    bool word = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+#else
+    bool shortcut = control;
+    bool word = control;
+#endif
+    int select = shift ? STB_TEXTEDIT_K_SHIFT : 0;
+    bool changed = false;
 
-    if (KEY_REPEAT(KEY_LEFT))  st->cursor = utf8_prev(buf, st->cursor);
-    if (KEY_REPEAT(KEY_RIGHT)) st->cursor = utf8_next(buf, st->cursor);
-    if (IsKeyPressed(KEY_HOME)) st->cursor = 0;
-    if (IsKeyPressed(KEY_END))  st->cursor = len;
-    if (KEY_REPEAT(KEY_BACKSPACE) && st->cursor > 0) {
-        size_t p = utf8_prev(buf, st->cursor);
-        memmove(buf + p, buf + st->cursor, len - st->cursor + 1);
-        st->cursor = p;
-    }
-    if (KEY_REPEAT(KEY_DELETE) && st->cursor < len) {
-        size_t n = utf8_next(buf, st->cursor);
-        memmove(buf + st->cursor, buf + n, len - n + 1);
-    }
-    if (mod) {
-        if (IsKeyPressed(KEY_V)) {
-            const char *clip = GetClipboardText();
-            while (clip && *clip) {
-                int n;
-                int cp = GetCodepointNext(clip, &n);
-                if (cp >= 32) ui_insert(buf, cap, &st->cursor, cp);
-                clip += n;
+    if (shortcut && IsKeyPressed(KEY_A)) {
+        st->edit.select_start = 0;
+        st->edit.select_end = st->edit.cursor = (int)st->count;
+    } else if (shortcut && IsKeyPressed(KEY_C)) {
+        text_copy_selection(st);
+    } else if (shortcut && IsKeyPressed(KEY_X)) {
+        text_copy_selection(st);
+        changed |= stb_textedit_cut(&buf, &st->edit) != 0;
+    } else if (shortcut && IsKeyPressed(KEY_V)) {
+        text_paste(&buf);
+        // Replacing a selection with equally many codepoints still changes
+        // the UTF-8 buffer, so do not infer this from the new length.
+        changed = true;
+    } else if (shortcut && IsKeyPressed(KEY_Z)) {
+        stb_textedit_key(&buf, &st->edit, IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT) ? STB_TEXTEDIT_K_REDO : STB_TEXTEDIT_K_UNDO);
+        changed = true;
+    } else if (shortcut && IsKeyPressed(KEY_Y)) {
+        stb_textedit_key(&buf, &st->edit, STB_TEXTEDIT_K_REDO);
+        changed = true;
+    } else {
+        if (KEY_REPEAT(KEY_LEFT) && !command)  stb_textedit_key(&buf, &st->edit, (word ? STB_TEXTEDIT_K_WORDLEFT : STB_TEXTEDIT_K_LEFT) | select);
+        if (KEY_REPEAT(KEY_RIGHT) && !command) stb_textedit_key(&buf, &st->edit, (word ? STB_TEXTEDIT_K_WORDRIGHT : STB_TEXTEDIT_K_RIGHT) | select);
+        if (KEY_REPEAT(KEY_HOME) || (command && KEY_REPEAT(KEY_LEFT))) stb_textedit_key(&buf, &st->edit, (command ? STB_TEXTEDIT_K_TEXTSTART : STB_TEXTEDIT_K_LINESTART) | select);
+        if (KEY_REPEAT(KEY_END) || (command && KEY_REPEAT(KEY_RIGHT))) stb_textedit_key(&buf, &st->edit, (command ? STB_TEXTEDIT_K_TEXTEND : STB_TEXTEDIT_K_LINEEND) | select);
+        if (KEY_REPEAT(KEY_BACKSPACE)) {
+            if (st->edit.select_start == st->edit.select_end) {
+                if (word) text_select_word(st, true);
+                else if (command) { st->edit.select_start = 0; st->edit.select_end = st->edit.cursor; }
+            }
+            size_t before = st->count;
+            stb_textedit_key(&buf, &st->edit, STB_TEXTEDIT_K_BACKSPACE);
+            changed |= before != st->count;
+        }
+        if (KEY_REPEAT(KEY_DELETE)) {
+            if (st->edit.select_start == st->edit.select_end) {
+                if (word) text_select_word(st, false);
+                else if (command) { st->edit.select_start = st->edit.cursor; st->edit.select_end = (int)st->count; }
+            }
+            size_t before = st->count;
+            stb_textedit_key(&buf, &st->edit, STB_TEXTEDIT_K_DELETE);
+            changed |= before != st->count;
+        }
+        if (!shortcut) {
+            int cp;
+            while ((cp = GetCharPressed()) > 0) {
+                if (cp >= 32) { stb_textedit_key(&buf, &st->edit, cp); changed = true; }
             }
         }
-        while (GetCharPressed() > 0) {} // swallow, the shortcut was the point
-    } else {
-        int cp;
-        while ((cp = GetCharPressed()) > 0) {
-            if (cp >= 32) ui_insert(buf, cap, &st->cursor, cp);
-        }
     }
-    if (GetKeyPressed() != 0) st->blink = GetTime();
+    if (changed) text_write(st);
+    if (changed || KEY_REPEAT(KEY_LEFT) || KEY_REPEAT(KEY_RIGHT) || KEY_REPEAT(KEY_HOME) || KEY_REPEAT(KEY_END)) st->blink = GetTime();
     return IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER);
 }
 
-// Single line text box. Returns true when Enter is pressed while focused.
-// With `secret` every character is drawn as a star.
-bool ui_input_id(uint64_t id, Rectangle r, const char *placeholder, char *buf, size_t cap,
-                 Text_State *st, bool secret)
+static char *text_slice(const Text_State *st, int start, int end, bool secret)
+{
+    if (start < 0) start = 0;
+    if (end > (int)st->count) end = (int)st->count;
+    size_t cap = secret ? (size_t)(end - start) + 1 : (size_t)(end - start)*4 + 1;
+    char *out = temp_alloc(cap);
+    size_t n = 0;
+    for (int i = start; i < end; ++i) {
+        if (secret) out[n++] = '*';
+        else {
+            int width;
+            const char *encoded = CodepointToUTF8((int)st->chars[i], &width);
+            memcpy(out + n, encoded, (size_t)width);
+            n += (size_t)width;
+        }
+    }
+    out[n] = '\0';
+    return out;
+}
+
+static float text_range_width(const Text_State *st, int start, int end, bool secret)
+{
+    return MeasureTextEx(ui.fonts[0], text_slice(st, start, end, secret), UI_BODY, 0).x;
+}
+
+static void text_caret(Color color)
+{
+    CLAY({ .layout = { .sizing = { CLAY_SIZING_FIXED(1), CLAY_SIZING_FIXED(UI_BODY + 3) } },
+           .backgroundColor = ui_clay_color(color) }) {}
+}
+
+bool ui_input_id(uint64_t id, const char *placeholder, char *buf, size_t cap, Text_State *st, bool secret)
 {
     const Theme *t = theme();
-    const float pad = 12, size = UI_BODY;
-    bool over = ui_hovered(r);
+    text_bind(st, buf, cap);
+    Clay_ElementId clay_id = ui_clay_id("widget", id);
+    bool over = Clay_PointerOver(clay_id);
     if (over) ui.cursor = MOUSE_CURSOR_IBEAM;
+    Clay_ElementData old = Clay_GetElementData(clay_id);
+    Vector2 mouse = GetMousePosition();
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         if (over) {
             ui.focus_id = id;
-            st->cursor = strlen(buf);
+            ui.active_id = id;
+            Text_Buffer text = { st };
+            stb_textedit_click(&text, &st->edit, mouse.x - old.boundingBox.x - 12 + st->scroll, mouse.y - old.boundingBox.y);
             st->blink = GetTime();
-        } else if (ui.focus_id == id) {
-            ui.focus_id = 0;
-        }
+        } else if (ui.focus_id == id) ui.focus_id = 0;
+    }
+    if (ui.active_id == id && IsMouseButtonDown(MOUSE_BUTTON_LEFT) && old.found) {
+        Text_Buffer text = { st };
+        stb_textedit_drag(&text, &st->edit, mouse.x - old.boundingBox.x - 12 + st->scroll, mouse.y - old.boundingBox.y);
+        st->blink = GetTime();
     }
     bool focused = ui.focus_id == id;
-    bool submitted = focused && ui_edit(buf, cap, st);
+    bool submitted = focused && text_edit(st);
 
-    float focus = ui_anim(id, focused);
-    ui_panel(r, UI_RADIUS, t->surface, ui_lerp(t->border, t->accent, focus));
-    if (focus > 0.01f) DrawRectangleRoundedLinesEx(r, ui_roundness(r, UI_RADIUS), 10, 1, Fade(t->accent, focus));
-
-    // What gets drawn: the buffer, or one star per character.
-    char *shown = buf;
-    if (secret) {
-        shown = temp_alloc(strlen(buf) + 1);
-        size_t n = 0;
-        for (size_t i = 0; buf[i]; i = utf8_next(buf, i)) shown[n++] = '*';
-        shown[n] = '\0';
-    }
-    size_t shown_cursor = st->cursor;
-    if (secret) {
-        shown_cursor = 0;
-        for (size_t i = 0; i < st->cursor && buf[i]; i = utf8_next(buf, i)) shown_cursor++;
-    }
-
-    // Keep the caret in view.
-    char saved = shown[shown_cursor];
-    shown[shown_cursor] = '\0';
-    float caret_x = ui_measure(shown, size, false).x;
-    shown[shown_cursor] = saved;
-    float avail = r.width - pad*2;
-    float total = ui_measure(shown, size, false).x;
+    int a = st->edit.select_start < st->edit.select_end ? st->edit.select_start : st->edit.select_end;
+    int b = st->edit.select_start > st->edit.select_end ? st->edit.select_start : st->edit.select_end;
+    float caret_x = text_range_width(st, 0, st->edit.cursor, secret);
+    float total = text_range_width(st, 0, (int)st->count, secret);
+    float avail = old.found ? old.boundingBox.width - 24 : 300;
     if (caret_x - st->scroll > avail) st->scroll = caret_x - avail;
     if (caret_x < st->scroll) st->scroll = caret_x;
     float max_scroll = total > avail ? total - avail : 0;
     if (st->scroll > max_scroll) st->scroll = max_scroll;
     if (st->scroll < 0) st->scroll = 0;
 
-    float text_y = r.y + (r.height - size)/2 - 1;
-    BeginScissorMode((int)(r.x + pad), (int)r.y, (int)avail, (int)r.height);
-    if (buf[0] == '\0' && !focused) {
-        ui_text(placeholder, r.x + pad, text_y, size, t->muted, false);
-    } else {
-        ui_text(shown, r.x + pad - st->scroll, text_y, size, t->text, false);
+    CLAY({ .id = clay_id, .layout = {
+               .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(UI_CONTROL) },
+               .padding = { .left = 12, .right = 12, .top = 8, .bottom = 8 }, .layoutDirection = CLAY_LEFT_TO_RIGHT,
+               .childAlignment = { CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER },
+           }, .backgroundColor = ui_clay_color(t->surface), .cornerRadius = CLAY_CORNER_RADIUS(UI_RADIUS),
+           .border = { .color = ui_clay_color(focused ? t->accent : t->border), .width = CLAY_BORDER_OUTSIDE(1) },
+           .clip = { .horizontal = true, .childOffset = { -st->scroll, 0 } } }) {
+        if (st->count == 0 && !focused) {
+            ui_text(placeholder, UI_BODY, t->muted, false);
+        } else if (a == b) {
+            ui_text(text_slice(st, 0, st->edit.cursor, secret), UI_BODY, t->text, false);
+            if (focused && fmod(GetTime() - st->blink, 1.0) < 0.55) text_caret(t->text);
+            ui_text(text_slice(st, st->edit.cursor, (int)st->count, secret), UI_BODY, t->text, false);
+        } else {
+            ui_text(text_slice(st, 0, a, secret), UI_BODY, t->text, false);
+            if (st->edit.cursor == a && focused) text_caret(t->text);
+            CLAY({ .layout = { .sizing = { CLAY_SIZING_FIT(0), CLAY_SIZING_FIT(0) } },
+                   .backgroundColor = ui_clay_color(t->accent_soft) }) {
+                ui_text(text_slice(st, a, b, secret), UI_BODY, t->text, false);
+            }
+            if (st->edit.cursor == b && focused) text_caret(t->text);
+            ui_text(text_slice(st, b, (int)st->count, secret), UI_BODY, t->text, false);
+        }
     }
-    if (focused && fmod(GetTime() - st->blink, 1.0) < 0.55) {
-        DrawRectangle((int)(r.x + pad + caret_x - st->scroll), (int)(text_y - 1), 1, (int)size + 3, t->text);
-    }
-    EndScissorMode();
     return submitted;
 }
 
-#define ui_input(r, placeholder, buf, st)  ui_input_id(UI_ID(0), (r), (placeholder), (buf), sizeof(buf), (st), false)
-#define ui_secret(r, placeholder, buf, st) ui_input_id(UI_ID(0), (r), (placeholder), (buf), sizeof(buf), (st), true)
+#define ui_input(placeholder, buf, st)  ui_input_id(UI_ID(0), (placeholder), (buf), sizeof(buf), (st), false)
+#define ui_secret(placeholder, buf, st) ui_input_id(UI_ID(0), (placeholder), (buf), sizeof(buf), (st), true)
 
-// Draws text wrapped at max_width, or only measures it when draw is false.
-// Returns the number of lines. Breaks at spaces, and inside words that are
-// wider than the whole line.
-int ui_wrap(const char *text, float size, float max_width, Vector2 at, Color color, bool draw)
-{
-    Font font = ui.font;
-    float line_h = size*1.4f;
-    char *line = temp_alloc(strlen(text) + 8);
-    size_t n = 0;
-    int lines = 0;
-
-#define FLUSH(len) do { \
-        char saved = line[len]; line[len] = '\0'; \
-        if (draw) DrawTextEx(font, line, (Vector2){at.x, at.y + lines*line_h}, size, 0, color); \
-        line[len] = saved; lines++; \
-    } while (0)
-
-    for (const char *p = text;;) {
-        int cp_size = 1;
-        int cp = *p ? GetCodepointNext(p, &cp_size) : 0;
-        if (cp == 0 || cp == '\n') {
-            FLUSH(n);
-            n = 0;
-            if (cp == 0) break;
-            p += cp_size;
-            continue;
-        }
-        if (n == 0 && cp == ' ') { p += cp_size; continue; }
-        memcpy(line + n, p, cp_size);
-        n += cp_size;
-        line[n] = '\0';
-        p += cp_size;
-
-        while (MeasureTextEx(font, line, size, 0).x > max_width) {
-            size_t cut = n;
-            while (cut > 0 && line[cut - 1] != ' ') --cut;   // just after the last space
-            size_t keep_from;
-            if (cut > 0 && cut < n) {
-                FLUSH(cut - 1);
-                keep_from = cut;
-            } else {
-                keep_from = utf8_prev(line, n);
-                if (keep_from == 0) break;                  // one glyph wider than the line
-                FLUSH(keep_from);
-            }
-            n -= keep_from;
-            memmove(line, line + keep_from, n + 1);
-        }
-    }
-#undef FLUSH
-    return lines;
-}
-
-float ui_line_height(float size)
-{
-    return size*1.4f;
-}
+// Clay v0.14's official raylib command renderer. It is kept separate from
+// the editor: rendering is Clay's output, editing is stb_textedit's state.
+#include "clay/clay_renderer_raylib.c"
 
 #endif // UI_C_

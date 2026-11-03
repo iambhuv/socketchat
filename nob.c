@@ -132,7 +132,7 @@ static bool generate_server_h(void)
     const char *text =
         "// The server the client connects to, as host or host:port.\n"
         "// Edit this and run ./nob again. Deleting the file restores the default.\n"
-        "#define SERVER \"apt.promtuz.dev:7777\"\n";
+        "#define SERVER \"apt.promtuz.dev:6767\"\n";
     if (!write_entire_file(path, text, strlen(text))) return false;
     nob_log(INFO, "Generated %s with the default server. Edit it to point at yours.", path);
     return true;
@@ -296,6 +296,12 @@ int main(int argc, char **argv)
     if (strcmp(command, "release") == 0) {
         release = true;
         return build_all() ? 0 : 1;
+    }
+    if (strcmp(command, "ui-test") == 0) {
+        if (!build_all()) return 1;
+        if (!build_program(BUILD "ui_test", "ui_test.c", true)) return 1;
+        cmd_append(&cmd, BUILD "ui_test");
+        return cmd_run(&cmd) ? 0 : 1;
     }
     if (strcmp(command, "test") == 0) {
         if (!mkdir_if_not_exists(BUILD)) return 1;

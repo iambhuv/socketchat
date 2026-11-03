@@ -17,6 +17,8 @@
 #include "bundle.h"
 #include "client.c"
 #include "db.c"
+#define CLAY_IMPLEMENTATION
+#include "clay.h"
 #include "ui.c"
 
 #define DEFAULT_PORT    5050
@@ -222,7 +224,6 @@ static void send_draft(Chat *c)
         db_store_message(c->db, c->key, c->peer, false, (uint64_t)time(NULL)*1000, text);
         reload_messages(c);
         c->draft[0] = '\0';
-        c->draft_st.cursor = 0;
         return;
     }
     if (c->client.state != CLIENT_READY) {
@@ -238,7 +239,6 @@ static void send_draft(Chat *c)
     snprintf(c->outgoing.text, sizeof(c->outgoing.text), SV_Fmt, SV_Arg(text));
     snprintf(c->send_status, sizeof(c->send_status), "Sending...");
     c->draft[0] = '\0';
-    c->draft_st.cursor = 0;
 }
 
 static void draw_toast(Chat *c)
@@ -247,277 +247,272 @@ static void draw_toast(Chat *c)
     float left = c->toast_until - GetTime();
     if (left <= 0) return;
     float alpha = left < 0.3f ? left/0.3f : 1;
-    Vector2 m = ui_measure(c->toast, UI_SMALL, true);
-    Rectangle r = { (GetScreenWidth() - m.x - 48)/2, GetScreenHeight() - 96.0f, m.x + 48, 36 };
-    ui_panel(r, 18, Fade(t->text, alpha), BLANK);
-    ui_text_centered(c->toast, r, UI_SMALL, Fade(t->bg, alpha), true);
+    CLAY({ .floating = {
+               .attachTo = CLAY_ATTACH_TO_ROOT, .zIndex = 2,
+               .attachPoints = { CLAY_ATTACH_POINT_CENTER_BOTTOM, CLAY_ATTACH_POINT_CENTER_BOTTOM },
+               .offset = { 0, -64 },
+           }, .layout = { .padding = CLAY_PADDING_ALL(12),
+               .childAlignment = { CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER } },
+           .backgroundColor = ui_clay_color(Fade(t->text, alpha)), .cornerRadius = CLAY_CORNER_RADIUS(18) }) {
+        ui_text(c->toast, UI_SMALL, Fade(t->bg, alpha), true);
+    }
 }
 
-// The card both login screens sit in. Returns where the form starts.
-static Vector2 login_card(Chat *c, float height, const char *title, const char *subtitle)
+static void ui_spacer(float height)
+{
+    CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(height) } } }) {}
+}
+
+static void login_header(Chat *c, const char *title, const char *subtitle)
 {
     const Theme *t = theme();
-    float w = GetScreenWidth(), h = GetScreenHeight();
-    Rectangle card = { (w - 400)/2, (h - height)/2, 400, height };
-    ui_panel(card, 12, t->surface, t->border);
-    float x = card.x + 32, y = card.y + 32;
-    ui_avatar((Vector2){ x + 20, y + 20 }, 20, c->nickname[0] ? c->nickname : "S", true);
-    ui_text(title, x + 56, y + 2, UI_TITLE, t->text, true);
-    ui_text(subtitle, x + 56, y + 32, UI_SMALL, t->muted, false);
-    ui_text(temp_sprintf("build %s", GIT_HASH), 16, h - 28, UI_CAPTION, t->muted, false);
-    return (Vector2){ x, y + 80 };
-}
-
-static void login_status(Chat *c, float x, float y)
-{
-    if (c->status[0]) ui_text(c->status, x, y, UI_SMALL, c->status_bad ? theme()->err : theme()->muted, false);
+    CLAY({ .layout = { .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 16,
+               .childAlignment = { CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER } } }) {
+        ui_avatar(c->nickname[0] ? c->nickname : "S", true);
+        CLAY({ .layout = { .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 2 } }) {
+            ui_text(title, UI_TITLE, t->text, true);
+            ui_text(subtitle, UI_SMALL, t->muted, false);
+        }
+    }
 }
 
 // First run: pick a nickname and a passphrase, make the identity.
 static void setup_screen(Chat *c)
 {
     const Theme *t = theme();
-    Vector2 at = login_card(c, 468, "Socket Chat", temp_sprintf("Server %s", SERVER));
-    float x = at.x, y = at.y, width = 400 - 64;
-
-    ui_text("Nickname", x, y, UI_SMALL, t->muted, true);
-    bool submit = ui_input(((Rectangle){ x, y + 22, width, UI_CONTROL }), "How your friends know you", c->nickname, &c->nickname_st);
-    y += 78;
-    ui_text("Passphrase", x, y, UI_SMALL, t->muted, true);
-    submit = ui_secret(((Rectangle){ x, y + 22, width, UI_CONTROL }), "Locks your messages on this computer", c->passphrase, &c->passphrase_st) || submit;
-    y += 78;
-    ui_text("Repeat it. There is no reset.", x, y, UI_SMALL, t->muted, true);
-    submit = ui_secret(((Rectangle){ x, y + 22, width, UI_CONTROL }), "", c->repeat, &c->repeat_st) || submit;
-    y += 86;
-
-    Rectangle btn = { x, y, width, UI_CONTROL };
-    if (ui_button(btn, "Get started", true) || submit) {
-        if (sv_trim(sv_from_cstr(c->nickname)).count == 0) {
-            set_status(c, true, "Pick a nickname first");
-        } else if (strcmp(c->passphrase, c->repeat) != 0) {
-            set_status(c, true, "The passphrases do not match");
-        } else if (!passphrase_key(c->key, sv_from_cstr(c->passphrase), c->salt) ||
-                   !db_create_identity(c->db, c->key, &c->me)) {
-            set_status(c, true, "Could not create your identity, see the log");
-        } else {
-            db_set(c->db, "nickname", c->nickname);
-            c->status[0] = '\0';
-            enter_chats(c);
-            start_login(c);
+    CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
+               .childAlignment = { CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER } } }) {
+        CLAY({ .layout = { .sizing = { CLAY_SIZING_FIXED(400), CLAY_SIZING_FIT(0, 520) },
+                   .padding = CLAY_PADDING_ALL(32), .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 12 },
+               .backgroundColor = ui_clay_color(t->surface), .cornerRadius = CLAY_CORNER_RADIUS(12),
+               .border = { .color = ui_clay_color(t->border), .width = CLAY_BORDER_OUTSIDE(1) } }) {
+            login_header(c, "Socket Chat", temp_sprintf("Server %s", SERVER));
+            ui_spacer(16);
+            ui_text("Nickname", UI_SMALL, t->muted, true);
+            bool submit = ui_input("How your friends know you", c->nickname, &c->nickname_st);
+            ui_text("Passphrase", UI_SMALL, t->muted, true);
+            submit = ui_secret("Locks your messages on this computer", c->passphrase, &c->passphrase_st) || submit;
+            ui_text("Repeat it. There is no reset.", UI_SMALL, t->muted, true);
+            submit = ui_secret("", c->repeat, &c->repeat_st) || submit;
+            ui_spacer(8);
+            if (ui_button("Get started", true) || submit) {
+                if (sv_trim(sv_from_cstr(c->nickname)).count == 0) {
+                    set_status(c, true, "Pick a nickname first");
+                } else if (strcmp(c->passphrase, c->repeat) != 0) {
+                    set_status(c, true, "The passphrases do not match");
+                } else if (!passphrase_key(c->key, sv_from_cstr(c->passphrase), c->salt) ||
+                           !db_create_identity(c->db, c->key, &c->me)) {
+                    set_status(c, true, "Could not create your identity, see the log");
+                } else {
+                    db_set(c->db, "nickname", c->nickname);
+                    c->status[0] = '\0';
+                    enter_chats(c);
+                    start_login(c);
+                }
+            }
+            if (c->status[0]) ui_text(c->status, UI_SMALL, c->status_bad ? t->err : t->muted, false);
         }
     }
-    login_status(c, x, btn.y + btn.height + 16);
 }
 
 // Every later run: the passphrase unlocks the identity and the history.
 static void unlock_screen(Chat *c)
 {
     const Theme *t = theme();
-    Vector2 at = login_card(c, 300, "Welcome back", temp_sprintf("%s on %s", c->nickname, SERVER));
-    float x = at.x, y = at.y, width = 400 - 64;
-
-    ui_text("Passphrase", x, y, UI_SMALL, t->muted, true);
-    bool submit = ui_secret(((Rectangle){ x, y + 22, width, UI_CONTROL }), "", c->passphrase, &c->passphrase_st);
-    y += 86;
-    Rectangle btn = { x, y, width, UI_CONTROL };
-    if (ui_button(btn, "Unlock", true) || submit) {
-        if (!passphrase_key(c->key, sv_from_cstr(c->passphrase), c->salt)) {
-            set_status(c, true, "Could not derive the key, see the log");
-        } else switch (db_load_identity(c->db, c->key, &c->me)) {
-        case DB_IDENTITY_OK:
-            c->status[0] = '\0';
-            enter_chats(c);
-            start_login(c);
-            break;
-        case DB_IDENTITY_WRONG_KEY:
-            set_status(c, true, "Wrong passphrase");
-            break;
-        case DB_IDENTITY_ERROR:
-        default:
-            set_status(c, true, "The database cannot be read, see the log");
-            break;
+    CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
+               .childAlignment = { CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER } } }) {
+        CLAY({ .layout = { .sizing = { CLAY_SIZING_FIXED(400), CLAY_SIZING_FIT(0, 360) },
+                   .padding = CLAY_PADDING_ALL(32), .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 12 },
+               .backgroundColor = ui_clay_color(t->surface), .cornerRadius = CLAY_CORNER_RADIUS(12),
+               .border = { .color = ui_clay_color(t->border), .width = CLAY_BORDER_OUTSIDE(1) } }) {
+            login_header(c, "Welcome back", temp_sprintf("%s on %s", c->nickname, SERVER));
+            ui_spacer(16);
+            ui_text("Passphrase", UI_SMALL, t->muted, true);
+            bool submit = ui_secret("", c->passphrase, &c->passphrase_st);
+            ui_spacer(8);
+            if (ui_button("Unlock", true) || submit) {
+                if (!passphrase_key(c->key, sv_from_cstr(c->passphrase), c->salt)) {
+                    set_status(c, true, "Could not derive the key, see the log");
+                } else switch (db_load_identity(c->db, c->key, &c->me)) {
+                case DB_IDENTITY_OK:
+                    c->status[0] = '\0';
+                    enter_chats(c);
+                    start_login(c);
+                    break;
+                case DB_IDENTITY_WRONG_KEY:
+                    set_status(c, true, "Wrong passphrase");
+                    break;
+                case DB_IDENTITY_ERROR:
+                default:
+                    set_status(c, true, "The database cannot be read, see the log");
+                    break;
+                }
+            }
+            if (c->status[0]) ui_text(c->status, UI_SMALL, c->status_bad ? t->err : t->muted, false);
         }
     }
-    login_status(c, x, btn.y + btn.height + 16);
 }
 
 static void add_contact_dialog(Chat *c)
 {
     const Theme *t = theme();
-    float w = GetScreenWidth(), h = GetScreenHeight();
-    DrawRectangle(0, 0, (int)w, (int)h, Fade(ui.dark ? BLACK : t->text, 0.4f));
-    Rectangle box = { (w - 440)/2, (h - 328)/2, 440, 328 };
-    bool outside = IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !ui_hovered(box);
-    ui_panel(box, 12, t->surface, t->border);
-
-    float x = box.x + 32, y = box.y + 28;
-    ui_text("Add a contact", x, y, UI_HEADING, t->text, true);
-    ui_text("Paste the link they sent you and give them a name.", x, y + 30, UI_SMALL, t->muted, false);
-
-    y += 72;
-    ui_text("Link", x, y, UI_SMALL, t->muted, true);
-    Rectangle link = { x, y + 22, box.width - 64, UI_CONTROL };
-    bool submit = ui_input(link, "chat://...", c->add.link, &c->add.link_st);
-    y += 86;
-    ui_text("Name", x, y, UI_SMALL, t->muted, true);
-    Rectangle nick = { x, y + 22, box.width - 64, UI_CONTROL };
-    submit = ui_input(nick, "Their nickname", c->add.nick, &c->add.nick_st) || submit;
-
-    Rectangle cancel = { box.x + box.width - 32 - 96 - 8 - 96, box.y + box.height - 32 - UI_CONTROL, 96, UI_CONTROL };
-    Rectangle add    = { box.x + box.width - 32 - 96, cancel.y, 96, UI_CONTROL };
-    if (ui_button(add, "Add", true) || submit) {
-        uint8_t pub[KEY_SIZE];
-        String_View nickname = sv_trim(sv_from_cstr(c->add.nick));
-        if (!link_parse(sv_from_cstr(c->add.link), pub)) {
-            snprintf(c->add.error, sizeof(c->add.error), "That is not a Socket Chat link");
-        } else if (nickname.count == 0) {
-            snprintf(c->add.error, sizeof(c->add.error), "Give them a name");
-        } else {
-            db_add_contact(c->db, pub, temp_sv_to_cstr(nickname));
-            db_contacts(c->db, &c->contacts);
-            c->add.open = false;
-            toast(c, "Contact added");
+    CLAY({ .floating = { .attachTo = CLAY_ATTACH_TO_ROOT, .zIndex = 1,
+               .attachPoints = { CLAY_ATTACH_POINT_CENTER_CENTER, CLAY_ATTACH_POINT_CENTER_CENTER } },
+           .layout = { .sizing = { CLAY_SIZING_FIXED(440), CLAY_SIZING_FIT(0, 380) },
+               .padding = CLAY_PADDING_ALL(32), .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 12 },
+           .backgroundColor = ui_clay_color(t->surface), .cornerRadius = CLAY_CORNER_RADIUS(12),
+           .border = { .color = ui_clay_color(t->border), .width = CLAY_BORDER_OUTSIDE(1) } }) {
+        ui_text("Add a contact", UI_HEADING, t->text, true);
+        ui_text("Paste the link they sent you and give them a name.", UI_SMALL, t->muted, false);
+        ui_spacer(8);
+        ui_text("Link", UI_SMALL, t->muted, true);
+        bool submit = ui_input("chat://...", c->add.link, &c->add.link_st);
+        ui_text("Name", UI_SMALL, t->muted, true);
+        submit = ui_input("Their nickname", c->add.nick, &c->add.nick_st) || submit;
+        if (c->add.error[0]) ui_text(c->add.error, UI_SMALL, t->err, false);
+        CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 8 } }) {
+            if (ui_button("Cancel", false) || IsKeyPressed(KEY_ESCAPE)) c->add.open = false;
+            if (ui_button("Add", true) || submit) {
+                uint8_t pub[KEY_SIZE];
+                String_View nickname = sv_trim(sv_from_cstr(c->add.nick));
+                if (!link_parse(sv_from_cstr(c->add.link), pub)) {
+                    snprintf(c->add.error, sizeof(c->add.error), "That is not a Socket Chat link");
+                } else if (nickname.count == 0) {
+                    snprintf(c->add.error, sizeof(c->add.error), "Give them a name");
+                } else {
+                    db_add_contact(c->db, pub, temp_sv_to_cstr(nickname));
+                    db_contacts(c->db, &c->contacts);
+                    c->add.open = false;
+                    toast(c, "Contact added");
+                }
+            }
         }
     }
-    if (ui_button(cancel, "Cancel", false) || IsKeyPressed(KEY_ESCAPE) || outside) c->add.open = false;
-    if (c->add.error[0]) ui_text(c->add.error, x, cancel.y + 12, UI_SMALL, t->err, false);
 }
 
 static void sidebar(Chat *c)
 {
     const Theme *t = theme();
-    float h = GetScreenHeight();
-    DrawRectangle(0, 0, (int)SIDEBAR_WIDTH, (int)h, t->surface);
-    DrawRectangle((int)SIDEBAR_WIDTH - 1, 0, 1, (int)h, t->border);
-
-    ui_avatar((Vector2){ 36, HEADER_HEIGHT/2 }, 18, c->nickname, true);
-    ui_text(c->nickname, 64, HEADER_HEIGHT/2 - 18, UI_BODY, t->text, true);
-    bool online = c->client.state == CLIENT_READY;
-    bool connecting = !online && c->client.state != CLIENT_OFFLINE;
-    DrawCircleV((Vector2){ 68, HEADER_HEIGHT/2 + 10 }, 3, online ? t->ok : connecting ? t->warn : t->err);
-    ui_text(online ? "online" : connecting ? "connecting" : "offline", 76, HEADER_HEIGHT/2 + 2, UI_CAPTION, t->muted, false);
-    if (!online && !connecting) {
-        Rectangle retry = { SIDEBAR_WIDTH - 16 - 64, HEADER_HEIGHT/2 - 16, 64, 32 };
-        if (ui_button(retry, "Retry", false)) start_login(c);
-    }
-    ui_hline(0, HEADER_HEIGHT, SIDEBAR_WIDTH);
-
-    // "You" first, then every contact that is not us.
-    float y = HEADER_HEIGHT + 8;
-    float bottom = h - 8 - UI_CONTROL*2 - 8 - 16;
-    for (size_t i = 0; i <= c->contacts.count; ++i) {
-        const uint8_t *pub = i == 0 ? c->me.pub : c->contacts.items[i - 1].pub;
-        if (i > 0 && keys_equal(pub, c->me.pub)) continue;
-        Rectangle r = { 8, y, SIDEBAR_WIDTH - 16, 56 };
-        if (r.y + r.height > bottom) break;
-        bool selected = c->chat_open && keys_equal(c->peer, pub);
-        uint64_t id = UI_ID((int)i);
-        bool clicked = ui_click(id, r);
-        float hover = ui_anim(id, ui_hovered(r));
-        Color fill = selected ? t->accent_soft : ui_lerp(t->surface, t->surface2, hover);
-        if (selected || hover > 0.01f) ui_panel(r, UI_RADIUS, fill, BLANK);
-        const char *name = contact_name(c, pub);
-        ui_avatar((Vector2){ r.x + 28, r.y + 28 }, 18, i == 0 ? "You" : name, selected);
-        ui_text(name, r.x + 56, r.y + 11, UI_BODY, t->text, true);
-        ui_text(i == 0 ? "Saved messages" : "Contact", r.x + 56, r.y + 31, UI_SMALL, t->muted, false);
-        if (clicked) open_chat(c, pub);
-        y += 60;
-    }
-
-    ui_hline(0, bottom, SIDEBAR_WIDTH);
-    Rectangle copy = { 16, h - 16 - UI_CONTROL*2 - 8, SIDEBAR_WIDTH - 32, UI_CONTROL };
-    Rectangle add  = { 16, h - 16 - UI_CONTROL, (SIDEBAR_WIDTH - 32 - 8)/2, UI_CONTROL };
-    Rectangle mode = { add.x + add.width + 8, add.y, add.width, UI_CONTROL };
-    if (ui_button(copy, "Copy my link", false)) {
-        char link[LINK_SIZE];
-        link_write(link, c->me.pub);
-        SetClipboardText(link);
-        toast(c, "Link copied. Send it to a friend.");
-    }
-    if (ui_button(add, "Add contact", true)) {
-        memset(&c->add, 0, sizeof(c->add));
-        c->add.open = true;
-    }
-    if (ui_button(mode, ui.dark ? "Light" : "Dark", false)) {
-        ui.dark = !ui.dark;
-        db_set(c->db, "dark", ui.dark ? "1" : "0");
+    CLAY({ .layout = { .sizing = { CLAY_SIZING_FIXED(SIDEBAR_WIDTH), CLAY_SIZING_GROW(0) },
+               .padding = CLAY_PADDING_ALL(16), .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 8 },
+           .backgroundColor = ui_clay_color(t->surface),
+           .border = { .color = ui_clay_color(t->border), .width = { .right = 1 } } }) {
+        bool online = c->client.state == CLIENT_READY;
+        bool connecting = !online && c->client.state != CLIENT_OFFLINE;
+        CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 10,
+                   .childAlignment = { CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER } } }) {
+            ui_avatar(c->nickname, true);
+            CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0, 64) }, .layoutDirection = CLAY_TOP_TO_BOTTOM } }) {
+                ui_text(c->nickname, UI_BODY, t->text, true);
+                ui_text(online ? "online" : connecting ? "connecting" : "offline", UI_CAPTION, t->muted, false);
+            }
+        }
+        if (!online && !connecting && ui_button("Retry", false)) start_login(c);
+        ui_hline();
+        CLAY({ .id = CLAY_ID("Contacts"), .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
+                   .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4 },
+               .clip = { .vertical = true, .childOffset = Clay_GetScrollOffset() } }) {
+            for (size_t i = 0; i <= c->contacts.count; ++i) {
+                const uint8_t *pub = i == 0 ? c->me.pub : c->contacts.items[i - 1].pub;
+                if (i > 0 && keys_equal(pub, c->me.pub)) continue;
+                bool selected = c->chat_open && keys_equal(c->peer, pub);
+                uint64_t id = UI_ID((int)i);
+                bool hover = ui_hovered(id);
+                const char *name = contact_name(c, pub);
+                CLAY({ .id = ui_clay_id("widget", id), .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(56) },
+                           .padding = CLAY_PADDING_ALL(8), .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 10,
+                           .childAlignment = { CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER } },
+                       .backgroundColor = ui_clay_color(selected ? t->accent_soft : hover ? t->surface2 : t->surface),
+                       .cornerRadius = CLAY_CORNER_RADIUS(UI_RADIUS) }) {
+                    ui_avatar(i == 0 ? "You" : name, selected);
+                    CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .layoutDirection = CLAY_TOP_TO_BOTTOM } }) {
+                        ui_text(name, UI_BODY, t->text, true);
+                        ui_text(i == 0 ? "Saved messages" : "Contact", UI_SMALL, t->muted, false);
+                    }
+                }
+                if (ui_click(id)) open_chat(c, pub);
+            }
+        }
+        ui_hline();
+        if (ui_button("Copy my link", false)) {
+            char link[LINK_SIZE];
+            link_write(link, c->me.pub);
+            SetClipboardText(link);
+            toast(c, "Link copied. Send it to a friend.");
+        }
+        CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 8 } }) {
+            if (ui_button("Add contact", true)) { memset(&c->add, 0, sizeof(c->add)); c->add.open = true; }
+            if (ui_button(ui.dark ? "Light" : "Dark", false)) { ui.dark = !ui.dark; db_set(c->db, "dark", ui.dark ? "1" : "0"); }
+        }
     }
 }
 
 static void conversation(Chat *c)
 {
     const Theme *t = theme();
-    float w = GetScreenWidth(), h = GetScreenHeight();
-    float left = SIDEBAR_WIDTH;
-
-    if (!c->chat_open) {
-        Rectangle middle = { left, 0, w - left, h };
-        ui_text_centered("Pick a conversation", middle, UI_HEADING, t->text, true);
-        middle.y += 40;
-        ui_text_centered("Or copy your link and send it to someone you trust.", middle, UI_SMALL, t->muted, false);
-        return;
-    }
-
-    bool self = keys_equal(c->peer, c->me.pub);
-    ui_avatar((Vector2){ left + 36, HEADER_HEIGHT/2 }, 18, self ? "You" : c->peer_name, true);
-    ui_text(c->peer_name, left + 64, HEADER_HEIGHT/2 - 18, UI_BODY, t->text, true);
-    const char *subtitle = "Notes to yourself";
-    if (!self) {
-        char number[SAFETY_NUMBER_SIZE];
-        safety_number(number, c->me.pub, c->peer);
-        subtitle = temp_sprintf("Encrypted. Safety number %s", number);
-    }
-    ui_text(subtitle, left + 64, HEADER_HEIGHT/2 + 2, UI_CAPTION, t->muted, false);
-    ui_hline(left, HEADER_HEIGHT, w - left);
-
-    // Composer at the bottom, messages stacked upwards from it.
-    float cy = h - UI_PAD - UI_CONTROL;
-    Rectangle send = { w - UI_PAD - 88, cy, 88, UI_CONTROL };
-    Rectangle box  = { left + UI_PAD, cy, send.x - 8 - left - UI_PAD, UI_CONTROL };
-    bool submit = ui_input(box, "Write a message", c->draft, &c->draft_st);
-    if (ui_button(send, c->outgoing.waiting ? "Sending" : "Send", true) || submit) send_draft(c);
-    if (c->send_status[0]) ui_text(c->send_status, box.x + 2, box.y - 22, UI_CAPTION, t->muted, false);
-
-    float max_width = (w - left)*0.6f;
-    float line_h = ui_line_height(UI_BODY);
-    float bottom = box.y - 32;
-    for (size_t i = c->messages.count; i > 0; --i) {
-        Message *m = &c->messages.items[i - 1];
-        const char *when = clock_text(m->timestamp_ms);
-        float when_w = ui_measure(when, UI_CAPTION, false).x;
-        float text_w = ui_measure(m->text, UI_BODY, false).x;
-        float inner = text_w + 12 + when_w;
-        if (inner < when_w + 40) inner = when_w + 40;
-        float bubble_w = (inner < max_width ? inner : max_width) + 28;
-        int lines = ui_wrap(m->text, UI_BODY, bubble_w - 28, (Vector2){0}, t->text, false);
-        bool when_fits = lines == 1 && inner <= max_width;
-        float bubble_h = lines*line_h + (when_fits ? 0 : 16) + 20;
-        float y = bottom - bubble_h;
-        if (y < HEADER_HEIGHT - bubble_h) break;
-
-        Rectangle r = { m->incoming ? left + UI_PAD : w - UI_PAD - bubble_w, y, bubble_w, bubble_h };
-        Color text = m->incoming ? t->text : WHITE;
-        Color faint = m->incoming ? t->muted : Fade(WHITE, 0.7f);
-        if (m->incoming) ui_panel(r, 12, t->surface2, t->border);
-        else ui_panel(r, 12, t->accent, BLANK);
-        ui_wrap(m->text, UI_BODY, bubble_w - 28, (Vector2){ r.x + 14, r.y + 10 }, text, true);
-        ui_text(when, r.x + r.width - 14 - when_w, r.y + r.height - 10 - UI_CAPTION, UI_CAPTION, faint, false);
-        bottom = y - 8;
-    }
-    if (c->messages.count == 0) {
-        Rectangle middle = { left, HEADER_HEIGHT, w - left, h - HEADER_HEIGHT - 80 };
-        ui_text_centered("No messages yet", middle, UI_HEADING, t->text, true);
-        middle.y += 36;
-        ui_text_centered(self ? "Write something to keep it close." : "They need to be online to receive it.",
-                         middle, UI_SMALL, t->muted, false);
+    CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) }, .layoutDirection = CLAY_TOP_TO_BOTTOM },
+           .backgroundColor = ui_clay_color(t->bg) }) {
+        if (!c->chat_open) {
+            CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) }, .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                       .childAlignment = { CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER }, .childGap = 8 } }) {
+                ui_text("Pick a conversation", UI_HEADING, t->text, true);
+                ui_text("Or copy your link and send it to someone you trust.", UI_SMALL, t->muted, false);
+            }
+        } else {
+        bool self = keys_equal(c->peer, c->me.pub);
+        const char *subtitle = "Notes to yourself";
+        if (!self) { char number[SAFETY_NUMBER_SIZE]; safety_number(number, c->me.pub, c->peer); subtitle = temp_sprintf("Encrypted. Safety number %s", number); }
+        CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIXED(72) }, .padding = CLAY_PADDING_ALL(16),
+                   .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 12, .childAlignment = { CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER } } }) {
+            ui_avatar(self ? "You" : c->peer_name, true);
+            CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .layoutDirection = CLAY_TOP_TO_BOTTOM } }) { ui_text(c->peer_name, UI_BODY, t->text, true); ui_text(subtitle, UI_CAPTION, t->muted, false); }
+        }
+        ui_hline();
+        CLAY({ .id = CLAY_ID("Messages"), .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) }, .padding = CLAY_PADDING_ALL(16),
+                   .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 8 }, .clip = { .vertical = true, .childOffset = Clay_GetScrollOffset() } }) {
+            if (c->messages.count == 0) {
+                CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) }, .layoutDirection = CLAY_TOP_TO_BOTTOM,
+                           .childAlignment = { CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER }, .childGap = 8 } }) {
+                    ui_text("No messages yet", UI_HEADING, t->text, true);
+                    ui_text(self ? "Write something to keep it close." : "They need to be online to receive it.", UI_SMALL, t->muted, false);
+                }
+            }
+            for (size_t i = 0; i < c->messages.count; ++i) {
+                Message *m = &c->messages.items[i];
+                Color fill = m->incoming ? t->surface2 : t->accent;
+                Color ink = m->incoming ? t->text : WHITE;
+                CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0, 400) },
+                           .childAlignment = { m->incoming ? CLAY_ALIGN_X_LEFT : CLAY_ALIGN_X_RIGHT, CLAY_ALIGN_Y_TOP } } }) {
+                    CLAY({ .layout = { .sizing = { CLAY_SIZING_FIT(0, 420), CLAY_SIZING_FIT(0, 1000) }, .padding = CLAY_PADDING_ALL(12), .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 6 },
+                           .backgroundColor = ui_clay_color(fill), .cornerRadius = CLAY_CORNER_RADIUS(12),
+                           .border = { .color = ui_clay_color(m->incoming ? t->border : fill), .width = CLAY_BORDER_OUTSIDE(1) } }) {
+                        ui_text(m->text, UI_BODY, ink, false);
+                        ui_text(clock_text(m->timestamp_ms), UI_CAPTION, m->incoming ? t->muted : Fade(WHITE, 0.7f), false);
+                    }
+                }
+            }
+        }
+        CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .padding = CLAY_PADDING_ALL(UI_PAD), .layoutDirection = CLAY_TOP_TO_BOTTOM, .childGap = 4 } }) {
+            if (c->send_status[0]) ui_text(c->send_status, UI_CAPTION, t->muted, false);
+            CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0) }, .layoutDirection = CLAY_LEFT_TO_RIGHT, .childGap = 8, .childAlignment = { CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER } } }) {
+                bool submit = ui_input("Write a message", c->draft, &c->draft_st);
+                CLAY({ .layout = { .sizing = { CLAY_SIZING_FIXED(88), CLAY_SIZING_FIXED(UI_CONTROL) } } }) {
+                    if (ui_button(c->outgoing.waiting ? "Sending" : "Send", true) || submit) send_draft(c);
+                }
+            }
+        }
+        }
     }
 }
 
 static void chats_screen(Chat *c)
 {
-    sidebar(c);
-    conversation(c);
-    if (c->add.open) add_contact_dialog(c);
+    CLAY({ .layout = { .sizing = { CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0) },
+               .layoutDirection = CLAY_LEFT_TO_RIGHT } }) {
+        sidebar(c);
+        conversation(c);
+        if (c->add.open) add_contact_dialog(c);
+    }
 }
 
 // ~/.socketchat/chat.db, created on first run. Falls back to the current
@@ -580,6 +575,7 @@ int main(int argc, char **argv)
         EndDrawing();
     }
 
+    ui_shutdown();
     CloseWindow();
     client_close(&c.client);
     sqlite3_close(c.db);

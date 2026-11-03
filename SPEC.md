@@ -64,7 +64,9 @@ something else gets deleted first.
 | Library         | Why                                   | How we use it                                 |
 |-----------------|---------------------------------------|-----------------------------------------------|
 | `nob.h`         | Build script, dynamic arrays, logging | `nob.c` builds everything. Code uses `da_append`, `String_Builder`, `String_View`, `temp_sprintf`, `nob_log`. |
-| raylib (source) | Window, drawing, text input, clipboard| `nob` compiles six raylib modules once into `build/libraylib.a`. HiDPI on, fonts drawn from a 64px atlas with mipmaps. |
+| raylib (source) | Window, drawing, input, clipboard     | `nob` compiles six raylib modules once into `build/libraylib.a`. HiDPI on, fonts drawn from a 64px atlas with mipmaps. |
+| `clay.h`        | Responsive immediate-mode layout       | Pinned v0.14 single-header layout engine; its raylib renderer turns Clay commands into draw calls. |
+| `stb_textedit.h`| Text-field editing                     | Pinned v1.14 editing core with selection, clipboard replacement, word movement, and undo/redo; the app supplies UTF-32 storage and raylib input. |
 | `sqlite3.c`     | Client storage                        | One amalgamation file, compiled once into `build/sqlite3.o`. |
 | `monocypher.c`  | Ed25519 sign and verify               | One `.c` + one `.h`. Replaces libsodium.      |
 
@@ -100,7 +102,7 @@ src/
   client.c            client side of the protocol, no UI
   chatd.c             the server
   db.c                SQLite: identity, contacts, messages, settings
-  ui.c                button, text box, panel, wrapped text, theme
+  ui.c                Clay components, text box editing, renderer bridge, theme
   chat.c              main + the two screens
 ```
 
@@ -251,7 +253,7 @@ Borrowed from tsoding's code (see musializer `plug.c`, tatr `tatr.c`):
 | `client.c`     |       | the login state machine, polling without blocking |
 | `chatd.c`      |       | accept loop, login, forwarding                 |
 | `db.c`         |       | the four tables                                |
-| `ui.c`         |       | immediate-mode UI, one frame at a time         |
+| `ui.c`         |       | Clay immediate-mode UI, editor and raylib bridge |
 | `chat.c`       |       | screens and how they call the rest             |
 | `nob.c`        |       | "the build script is also C"                   |
 
